@@ -1,3 +1,4 @@
+use bottles_core::proto::NotifyRequest;
 pub use bottles_core::proto::{bottles_client::BottlesClient, HealthRequest};
 use clap::{Parser, Subcommand};
 
@@ -12,6 +13,11 @@ struct Cli {
 enum Command {
     #[command(about = "Check the health of the server")]
     Health,
+    #[command(about = "Notify the server")]
+    Notify {
+        #[arg(help = "The message to send")]
+        message: String,
+    },
 }
 
 #[tokio::main]
@@ -28,6 +34,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Server is healthy");
             } else {
                 println!("Server is unhealthy");
+            }
+        }
+        Command::Notify { message } => {
+            let request = NotifyRequest { message };
+            let response = client.notify(request).await?;
+            let response = response.get_ref();
+            if response.success {
+                println!("Message sent successfully");
+            } else {
+                println!("Failed to send message");
             }
         }
     }
