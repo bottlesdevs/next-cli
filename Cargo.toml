@@ -7,3 +7,6 @@ edition = "2021"
 bottles-core = { git = "https://github.com/bottlesdevs/next-core" }
 clap = { version = "4.5.23", features = ["derive"] }
 tokio = { version = "1.42.0", features = ["full"] }
+
+# [patch."https://github.com/bottlesdevs/next-core"]
+# bottles-core = { path = "../next-core" }
