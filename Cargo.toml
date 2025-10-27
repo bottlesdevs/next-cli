@@ -8,6 +8,7 @@ bottles-core.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
 tokio.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
 
 # [patch."https://github.com/bottlesdevs/next-core"]
 # bottles-core = { path = "../next-core" }
