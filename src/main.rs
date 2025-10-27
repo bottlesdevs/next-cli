@@ -1,6 +1,7 @@
 use bottles_core::proto::NotifyRequest;
 pub use bottles_core::proto::{HealthRequest, bottles_client::BottlesClient};
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
