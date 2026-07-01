@@ -1,5 +1,5 @@
-use bottles_core::WineBridgeClient;
 use bottles_core::runner::{PrefixArch, PrefixConfig, Proton, Runner, Wine};
+use bottles_core::{LaunchRequest, WineBridgeClient};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{io, path::PathBuf, process::ExitCode};
 use tracing_subscriber::EnvFilter;
@@ -273,25 +273,19 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Launch(args) => {
-            if !args.args.is_empty() {
-                unimplemented!("WineBridge launch arguments are not implemented in next-core yet");
-            }
-
-            if args.work_dir.is_some() {
-                unimplemented!(
-                    "WineBridge launch working directories are not implemented in next-core yet"
-                );
-            }
-
             let (runner, prefix) = create_runner(args.bridge.runner)?;
             let client =
                 WineBridgeClient::new(runner.as_ref(), &prefix, args.bridge.winebridge).await?;
-            let pid = client.launch_process(args.executable).await?;
+
+            let request = LaunchRequest::new(args.executable)
+                .args(args.args)
+                .maybe_work_dir(args.work_dir);
+            let pid = client.launch_process(request).await?;
             println!("Launched process with pid {pid}");
 
             client.shutdown().await?;
 
-            println!("Process {pid} exited");
+            println!("WineBridge agent shut down");
             Ok(ExitCode::SUCCESS)
         }
         Command::Process(args) => match args.command {
@@ -304,7 +298,21 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Ok(ExitCode::SUCCESS)
             }
             ProcessCommand::List => {
-                unimplemented!("WineBridge process listing is not implemented in next-core yet")
+                let (runner, prefix) = create_runner(args.bridge.runner)?;
+                let client =
+                    WineBridgeClient::new(runner.as_ref(), &prefix, args.bridge.winebridge).await?;
+
+                let processes = client.running_processes().await?;
+                println!("{:>8}  {:>7}  NAME", "PID", "THREADS");
+                for process in &processes {
+                    println!(
+                        "{:>8}  {:>7}  {}",
+                        process.pid, process.threads, process.name
+                    );
+                }
+
+                client.shutdown().await?;
+                Ok(ExitCode::SUCCESS)
             }
         },
         Command::Bottle(_) => {
