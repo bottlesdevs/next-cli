@@ -476,7 +476,7 @@ async fn run_virgo(args: VirgoArgs) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         VirgoSubcommands::States { prefix } => {
-            let states = daemon.list_states(prefix).await?;
+            let states = daemon.list_commits(prefix).await?;
             if states.is_empty() {
                 println!("(no restore points)");
             }
