@@ -1,6 +1,9 @@
 use bottles_core::proto::NotifyRequest;
 pub use bottles_core::proto::{HealthRequest, bottles_client::BottlesClient};
+use bottles_core::{Layer, VirgoDaemon};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io;
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -22,6 +25,78 @@ enum Command {
     Runtime(RuntimeArgs),
     #[command(about = "Check system health and send notifications")]
     System(SystemArgs),
+    #[command(about = "Manage prefix snapshots and layers through fvs2d (Virgo)")]
+    Virgo(VirgoArgs),
+}
+
+#[derive(Debug, Args)]
+struct VirgoArgs {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Path to the fvs2d binary; spawns a private daemon for this command"
+    )]
+    fvs2d: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "ADDR",
+        help = "Connect to a running fvs2d manager instead (e.g. http://127.0.0.1:50151)"
+    )]
+    connect: Option<String>,
+    #[command(subcommand)]
+    command: VirgoSubcommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum VirgoSubcommands {
+    #[command(about = "Show daemon version and host capabilities")]
+    Probe,
+    #[command(about = "Initialize snapshot tracking for a prefix")]
+    Init {
+        #[arg(help = "Prefix directory")]
+        prefix: PathBuf,
+    },
+    #[command(about = "Create a restore point of a prefix")]
+    Snapshot {
+        #[arg(help = "Prefix directory")]
+        prefix: PathBuf,
+        #[arg(short, long, default_value = "", help = "Snapshot label")]
+        message: String,
+    },
+    #[command(about = "List the restore points of a prefix")]
+    States {
+        #[arg(help = "Prefix directory")]
+        prefix: PathBuf,
+    },
+    #[command(about = "Roll a prefix back to a restore point (exact checkout)")]
+    Rollback {
+        #[arg(help = "Prefix directory")]
+        prefix: PathBuf,
+        #[arg(help = "State id (full or prefix)")]
+        state: String,
+    },
+    #[command(about = "Mount a stack of layers (requires --connect)")]
+    Mount {
+        #[arg(help = "Mountpoint directory")]
+        mount_point: PathBuf,
+        #[arg(
+            long = "layer",
+            required = true,
+            help = "Layer, low to high: repo | repo@state | repo#branch"
+        )]
+        layers: Vec<String>,
+        #[arg(long, help = "Writable upper layer directory")]
+        upper: Option<PathBuf>,
+    },
+    #[command(about = "List the mounts owned by the daemon (requires --connect)")]
+    Mounts,
+    #[command(about = "Unmount a mount by id (requires --connect)")]
+    Unmount {
+        #[arg(help = "Mount id")]
+        mount_id: String,
+        #[arg(long, help = "Detach even if the mountpoint is busy")]
+        lazy: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -207,10 +282,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Cli::parse();
+    match args.command {
+        Command::Virgo(virgo) => return run_virgo(virgo).await,
+        command => run_bottles(command).await,
+    }
+}
+
+async fn run_bottles(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let url = "http://[::1]:50052";
     let mut client = BottlesClient::connect(url).await?;
 
-    match args.command {
+    match command {
+        Command::Virgo(_) => unreachable!("handled before connecting"),
         Command::Management(m) => match m.command {
             ManagementSubcommands::Create {
                 name,
@@ -340,4 +423,131 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     }
     Ok(())
+}
+
+fn parse_layer(spec: &str) -> Layer {
+    if let Some((repo, state)) = spec.rsplit_once('@') {
+        return Layer::new(repo).state(state);
+    }
+    if let Some((repo, branch)) = spec.rsplit_once('#') {
+        return Layer::new(repo).branch(branch);
+    }
+    Layer::new(spec)
+}
+
+async fn run_virgo(args: VirgoArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let owned = args.connect.is_none();
+    let daemon = match (args.connect, args.fvs2d) {
+        (Some(addr), _) => VirgoDaemon::connect(addr).await?,
+        (None, Some(bin)) => VirgoDaemon::spawn(bin).await?,
+        (None, None) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pass --fvs2d to spawn a daemon or --connect to reach a running one",
+            )
+            .into());
+        }
+    };
+
+    let result = match args.command {
+        VirgoSubcommands::Probe => {
+            let info = daemon.probe().await?;
+            println!(
+                "version={} pid={} dev_fuse={} fusermount={} flatpak={}",
+                info.daemon_version,
+                info.pid,
+                info.dev_fuse_accessible,
+                info.fusermount_available,
+                info.running_in_flatpak
+            );
+            Ok(())
+        }
+        VirgoSubcommands::Init { prefix } => {
+            let repo = daemon.init_repository(prefix).await?;
+            println!("initialized {}", repo.repository_path);
+            Ok(())
+        }
+        VirgoSubcommands::Snapshot { prefix, message } => {
+            let revision = daemon.create_restore_point(prefix, message).await?;
+            println!(
+                "restore point {}",
+                &revision.state_id[..12.min(revision.state_id.len())]
+            );
+            Ok(())
+        }
+        VirgoSubcommands::States { prefix } => {
+            let states = daemon.list_states(prefix).await?;
+            if states.is_empty() {
+                println!("(no restore points)");
+            }
+            for state in states {
+                let label = if state.message.is_empty() {
+                    "(no label)"
+                } else {
+                    &state.message
+                };
+                println!(
+                    "{}  {}",
+                    &state.state_id[..12.min(state.state_id.len())],
+                    label
+                );
+            }
+            Ok(())
+        }
+        VirgoSubcommands::Rollback { prefix, state } => {
+            let restored = daemon.rollback(prefix, state).await?;
+            println!(
+                "rolled back to {} in {}",
+                &restored.state_id[..12.min(restored.state_id.len())],
+                restored.destination_path
+            );
+            Ok(())
+        }
+        VirgoSubcommands::Mount {
+            mount_point,
+            layers,
+            upper,
+        } => {
+            if owned {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "mount requires --connect: the mount lives as long as the daemon",
+                )
+                .into());
+            }
+            let layers = layers.iter().map(|s| parse_layer(s)).collect();
+            let mount = daemon.create_mount(mount_point, layers, upper).await?;
+            println!(
+                "mounted {} at {} (nodes {})",
+                mount.id,
+                mount.spec.map(|s| s.mount_point).unwrap_or_default(),
+                mount.node_count
+            );
+            Ok(())
+        }
+        VirgoSubcommands::Mounts => {
+            let mounts = daemon.list_mounts().await?;
+            if mounts.is_empty() {
+                println!("(no mounts)");
+            }
+            for mount in mounts {
+                println!(
+                    "{}  {}",
+                    mount.id,
+                    mount.spec.map(|s| s.mount_point).unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        VirgoSubcommands::Unmount { mount_id, lazy } => {
+            daemon.unmount(mount_id, lazy).await?;
+            println!("unmounted");
+            Ok(())
+        }
+    };
+
+    if owned {
+        daemon.shutdown().await?;
+    }
+    result
 }
