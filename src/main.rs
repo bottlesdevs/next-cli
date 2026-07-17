@@ -1,553 +1,452 @@
-use bottles_core::proto::NotifyRequest;
-pub use bottles_core::proto::{HealthRequest, bottles_client::BottlesClient};
-use bottles_core::{Layer, VirgoDaemon};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::io;
-use std::path::PathBuf;
-use tracing_subscriber::EnvFilter;
+use std::{error::Error, io, path::PathBuf};
 
-#[derive(Debug, Parser)]
-#[command(version, about = "CLI for managing Bottles wine environments", long_about = None)]
+use bottles_core::{
+    bottle::{Bottle, BottleManager, BottleType, Program},
+    compatibility::{
+        components::{Component, ComponentManager},
+        dependencies::{Dependency, DependencyManager},
+    },
+};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+#[derive(Parser)]
+#[command(version, about = "Bottles Next test CLI")]
 struct Cli {
+    #[arg(long, global = true, value_name = "PATH")]
+    fvs2d: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum Command {
-    #[command(about = "Manage bottle life cycles")]
-    Management(ManagementArgs),
-    #[command(about = "Configure bottle settings and environment variables")]
-    Configuration(ConfigurationArgs),
-    #[command(about = "Install or remove components like DXVK, VKD3D, or dependencies")]
-    Installer(InstallerArgs),
-    #[command(about = "Run and monitor programs within a bottle")]
-    Runtime(RuntimeArgs),
-    #[command(about = "Check system health and send notifications")]
-    System(SystemArgs),
-    #[command(about = "Manage prefix snapshots and layers through fvs2d (Virgo)")]
-    Virgo(VirgoArgs),
-}
-
-#[derive(Debug, Args)]
-struct VirgoArgs {
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Path to the fvs2d binary; spawns a private daemon for this command"
-    )]
-    fvs2d: Option<PathBuf>,
-    #[arg(
-        long,
-        value_name = "ADDR",
-        help = "Connect to a running fvs2d manager instead (e.g. http://127.0.0.1:50151)"
-    )]
-    connect: Option<String>,
-    #[command(subcommand)]
-    command: VirgoSubcommands,
-}
-
-#[derive(Debug, Subcommand)]
-enum VirgoSubcommands {
-    #[command(about = "Show daemon version and host capabilities")]
-    Probe,
-    #[command(about = "Initialize snapshot tracking for a prefix")]
-    Init {
-        #[arg(help = "Prefix directory")]
-        prefix: PathBuf,
-    },
-    #[command(about = "Create a restore point of a prefix")]
-    Snapshot {
-        #[arg(help = "Prefix directory")]
-        prefix: PathBuf,
-        #[arg(short, long, default_value = "", help = "Snapshot label")]
-        message: String,
-    },
-    #[command(about = "List the restore points of a prefix")]
-    States {
-        #[arg(help = "Prefix directory")]
-        prefix: PathBuf,
-    },
-    #[command(about = "Roll a prefix back to a restore point (exact checkout)")]
-    Rollback {
-        #[arg(help = "Prefix directory")]
-        prefix: PathBuf,
-        #[arg(help = "State id (full or prefix)")]
-        state: String,
-    },
-    #[command(about = "Mount a stack of layers (requires --connect)")]
-    Mount {
-        #[arg(help = "Mountpoint directory")]
-        mount_point: PathBuf,
-        #[arg(
-            long = "layer",
-            required = true,
-            help = "Layer, low to high: repo | repo@state | repo#branch"
-        )]
-        layers: Vec<String>,
-        #[arg(long, help = "Writable upper layer directory")]
-        upper: Option<PathBuf>,
-    },
-    #[command(about = "List the mounts owned by the daemon (requires --connect)")]
-    Mounts,
-    #[command(about = "Unmount a mount by id (requires --connect)")]
-    Unmount {
-        #[arg(help = "Mount id")]
-        mount_id: String,
-        #[arg(long, help = "Detach even if the mountpoint is busy")]
-        lazy: bool,
+    /// List locally available components.
+    Components,
+    /// List locally available dependencies.
+    Dependencies,
+    /// Create, list, or manage bottles.
+    Bottle {
+        #[command(subcommand)]
+        command: BottleCommand,
     },
 }
 
-#[derive(Debug, Args)]
-struct ManagementArgs {
-    #[command(subcommand)]
-    command: ManagementSubcommands,
-}
-
-#[derive(Debug, Subcommand)]
-enum ManagementSubcommands {
-    #[command(about = "Create a new bottle environment")]
-    Create {
-        #[arg(help = "The unique name for the new bottle")]
-        name: String,
-        #[arg(value_enum, help = "The environment preset to use")]
-        bottle_type: BottleTypeCli,
-        #[arg(help = "Optional runner override (e.g. soda-7.0-9)")]
-        runner: Option<String>,
-    },
-    #[command(about = "Permanently delete a bottle")]
-    Delete {
-        #[arg(help = "Name of the bottle to delete")]
-        name: String,
-    },
-    #[command(about = "List all existing bottles")]
+#[derive(Subcommand)]
+enum BottleCommand {
+    /// Create a bottle from locally available components.
+    Create(CreateArgs),
+    /// List bottles.
     List,
-    #[command(about = "Get detailed information about a specific bottle")]
-    Get {
-        #[arg(help = "Name of the bottle to inspect")]
-        name: String,
-    },
-    #[command(about = "Start the bottle agent")]
-    Start {
-        #[arg(help = "Name of the bottle to start")]
-        name: String,
-    },
-    #[command(about = "Stop the bottle agent and running programs")]
-    Stop {
-        #[arg(help = "Name of the bottle to stop")]
-        name: String,
-    },
-    #[command(about = "Restart the bottle agent")]
-    Restart {
-        #[arg(help = "Name of the bottle to restart")]
-        name: String,
-    },
+    /// Manage one bottle selected by UUID or name.
+    Manage(ManageArgs),
 }
 
-#[derive(Debug, Args)]
-struct ConfigurationArgs {
+#[derive(Args)]
+struct ManageArgs {
+    bottle: String,
+
     #[command(subcommand)]
-    command: ConfigurationSubcommands,
+    command: ManageCommand,
 }
 
-#[derive(Debug, Subcommand)]
-enum ConfigurationSubcommands {
-    #[command(about = "Retrieve the current configuration for a bottle")]
-    GetConfig {
-        #[arg(help = "Name of the bottle")]
-        name: String,
-    },
-    #[command(about = "Update bottle settings")]
-    UpdateConfig {
-        #[arg(help = "Name of the bottle to update")]
-        name: String,
-        #[arg(help = "The new runner version to assign")]
-        runner: String,
-    },
-    #[command(about = "List environment variables for a bottle")]
-    GetEnv {
-        #[arg(help = "Name of the bottle")]
-        name: String,
-    },
-    #[command(about = "Set environment variables using KEY=VALUE format")]
-    SetEnv {
-        #[arg(help = "Name of the bottle")]
-        name: String,
-        #[arg(help = "Variables to set (e.g. PROTON_USE_WINE_DXGI=1)")]
-        vars: Vec<String>,
-    },
-}
-
-#[derive(Debug, Args)]
-struct InstallerArgs {
-    #[command(subcommand)]
-    command: InstallerSubcommands,
-}
-
-#[derive(Debug, Subcommand)]
-enum InstallerSubcommands {
-    #[command(about = "Install a component into a bottle")]
+#[derive(Subcommand)]
+enum ManageCommand {
+    Show,
+    Delete,
+    Stop,
+    Processes,
     Install {
-        #[arg(help = "Target bottle name")]
-        bottle_name: String,
-        #[arg(help = "ID of the component (e.g. dxvk, vkd3d)")]
-        component_id: String,
-        #[arg(short, long, help = "Specific version to install (defaults to latest)")]
-        version: Option<String>,
+        #[command(subcommand)]
+        command: InstallCommand,
     },
-    #[command(about = "List available components")]
-    List {
-        #[arg(short, long, help = "Filter components by type (e.g. runner, layer)")]
-        filter: Option<String>,
-    },
-    #[command(about = "Uninstall a component from a bottle")]
     Uninstall {
-        #[arg(help = "Target bottle name")]
-        bottle_name: String,
-        #[arg(help = "ID of the component to remove")]
-        component_id: String,
+        #[command(subcommand)]
+        command: UninstallCommand,
+    },
+    Program {
+        #[command(subcommand)]
+        command: ProgramCommand,
     },
 }
 
-#[derive(Debug, Args)]
-struct RuntimeArgs {
-    #[command(subcommand)]
-    command: RuntimeSubcommands,
+#[derive(Subcommand)]
+enum InstallCommand {
+    Component {
+        #[arg(value_name = "UUID")]
+        component: String,
+    },
+    Dependency {
+        #[arg(value_name = "UUID")]
+        dependency: String,
+    },
 }
 
-#[derive(Debug, Subcommand)]
-enum RuntimeSubcommands {
-    #[command(about = "Launch a Windows program inside the bottle")]
+#[derive(Subcommand)]
+enum UninstallCommand {
+    Component {
+        #[arg(value_name = "UUID")]
+        component: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProgramCommand {
+    Add(AddProgramArgs),
     Launch {
-        #[arg(help = "Name of the bottle")]
-        bottle_name: String,
-        #[arg(help = "Path to the executable file")]
-        program_path: String,
-        #[arg(last = true, help = "Arguments passed directly to the program")]
-        args: Vec<String>,
-        #[arg(long, help = "The working directory for the process")]
-        work_dir: Option<String>,
-        #[arg(long, help = "Run the program within a visible terminal")]
-        terminal: bool,
-    },
-    #[command(about = "Forcefully terminate a running program")]
-    Terminate {
-        #[arg(help = "Name of the bottle")]
-        bottle_name: String,
-        #[arg(help = "Process ID (PID) to kill")]
-        pid: u32,
-    },
-    #[command(about = "List all active processes in a bottle")]
-    ListProcesses {
-        #[arg(help = "Name of the bottle")]
-        name: String,
+        #[arg(value_name = "UUID")]
+        program: String,
     },
 }
 
-#[derive(Debug, Args)]
-struct SystemArgs {
-    #[command(subcommand)]
-    command: SystemSubcommands,
+#[derive(Args)]
+struct AddProgramArgs {
+    name: String,
+    executable: String,
+    #[arg(long = "arg", allow_hyphen_values = true)]
+    arguments: Vec<String>,
+    #[arg(long)]
+    working_directory: Option<String>,
+    #[arg(long)]
+    new_console: bool,
 }
 
-#[derive(Debug, Subcommand)]
-enum SystemSubcommands {
-    #[command(about = "Check if the gRPC server is responding")]
-    Health,
-    #[command(about = "Send a notification to the system")]
-    Notify {
-        #[arg(help = "The message text to display")]
-        message: String,
-    },
+#[derive(Args)]
+struct CreateArgs {
+    name: String,
+
+    #[arg(long, value_enum, default_value_t = Storage::Standard)]
+    storage: Storage,
+
+    #[arg(long, value_name = "UUID")]
+    runner: String,
+
+    #[arg(long, value_name = "UUID")]
+    winebridge: String,
 }
 
-#[derive(Debug, ValueEnum, Clone)]
-enum BottleTypeCli {
-    #[value(help = "A bottle with no predefined settings")]
-    Custom,
-    #[value(help = "Optimized for gaming with DXVK and high-performance settings")]
-    Gaming,
-    #[value(help = "Optimized for general purpose software")]
-    Software,
+#[derive(Clone, Copy, ValueEnum)]
+enum Storage {
+    Standard,
+    Virgo,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("bottles_cli=trace")),
-        )
-        .init();
-
-    let args = Cli::parse();
-    match args.command {
-        Command::Virgo(virgo) => return run_virgo(virgo).await,
-        command => run_bottles(command).await,
+impl Storage {
+    fn bottle_type(self) -> BottleType {
+        match self {
+            Self::Standard => BottleType::Standard,
+            Self::Virgo => BottleType::Virgo,
+        }
     }
 }
 
-async fn run_bottles(command: Command) -> Result<(), Box<dyn std::error::Error>> {
-    let url = "http://[::1]:50052";
-    let mut client = BottlesClient::connect(url).await?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
 
-    match command {
-        Command::Virgo(_) => unreachable!("handled before connecting"),
-        Command::Management(m) => match m.command {
-            ManagementSubcommands::Create {
-                name,
-                bottle_type,
-                runner,
-            } => {
+    match cli.command {
+        Command::Components => {
+            for component in ComponentManager::new()?.components() {
+                print_component(component);
+            }
+        }
+        Command::Dependencies => {
+            for dependency in DependencyManager::new()?.dependencies() {
                 println!(
-                    "Action: CreateBottle | Name: {} | Type: {:?} | Runner: {:?}",
-                    name, bottle_type, runner
+                    "{}\t{}\t{}",
+                    dependency.id(),
+                    dependency.name(),
+                    dependency.version()
                 );
             }
-            ManagementSubcommands::Delete { name } => {
-                println!("Action: DeleteBottle | Name: {}", name);
-            }
-            ManagementSubcommands::List => {
-                println!("Action: ListBottles");
-            }
-            ManagementSubcommands::Get { name } => {
-                println!("Action: GetBottle | Name: {}", name);
-            }
-            ManagementSubcommands::Start { name } => {
-                println!("Action: StartBottle | Name: {}", name);
-            }
-            ManagementSubcommands::Stop { name } => {
-                println!("Action: StopBottle | Name: {}", name);
-            }
-            ManagementSubcommands::Restart { name } => {
-                println!("Action: RestartBottle | Name: {}", name);
-            }
-        },
-
-        Command::Configuration(c) => match c.command {
-            ConfigurationSubcommands::GetConfig { name } => {
-                println!("Action: GetConfig | Bottle: {}", name);
-            }
-            ConfigurationSubcommands::UpdateConfig { name, runner } => {
-                println!(
-                    "Action: UpdateConfig | Bottle: {} | New Runner: {}",
-                    name, runner
-                );
-            }
-            ConfigurationSubcommands::GetEnv { name } => {
-                println!("Action: GetEnvironmentVariables | Bottle: {}", name);
-            }
-            ConfigurationSubcommands::SetEnv { name, vars } => {
-                println!(
-                    "Action: SetEnvironmentVariables | Bottle: {} | Variables: {:?}",
-                    name, vars
-                );
-            }
-        },
-
-        Command::Installer(i) => match i.command {
-            InstallerSubcommands::Install {
-                bottle_name,
-                component_id,
-                version,
-            } => {
-                println!(
-                    "Action: InstallComponent | Bottle: {} | ID: {} | Version: {:?}",
-                    bottle_name, component_id, version
-                );
-            }
-            InstallerSubcommands::List { filter } => {
-                println!("Action: ListComponents | Filter: {:?}", filter);
-            }
-            InstallerSubcommands::Uninstall {
-                bottle_name,
-                component_id,
-            } => {
-                println!(
-                    "Action: UninstallComponent | Bottle: {} | ID: {}",
-                    bottle_name, component_id
-                );
-            }
-        },
-
-        Command::Runtime(r) => match r.command {
-            RuntimeSubcommands::Launch {
-                bottle_name,
-                program_path,
-                args,
-                work_dir,
-                terminal,
-            } => {
-                println!("Action: LaunchProgram");
-                println!(" -> Bottle: {}", bottle_name);
-                println!(" -> Path: {}", program_path);
-                println!(" -> Args: {:?}", args);
-                println!(" -> WorkDir: {:?}", work_dir);
-                println!(" -> Terminal: {}", terminal);
-            }
-            RuntimeSubcommands::Terminate { bottle_name, pid } => {
-                println!(
-                    "Action: TerminateProgram | Bottle: {} | PID: {}",
-                    bottle_name, pid
-                );
-            }
-            RuntimeSubcommands::ListProcesses { name } => {
-                println!("Action: ListRunningProcesses | Bottle: {}", name);
-            }
-        },
-
-        Command::System(s) => match s.command {
-            SystemSubcommands::Health => {
-                println!("Action: SystemHealth");
-                let request = HealthRequest {};
-                let response = client.health(request).await?;
-                let response = response.get_ref();
-                if response.ok {
-                    tracing::info!("Server is healthy");
-                } else {
-                    tracing::info!("Server is unhealthy");
+        }
+        Command::Bottle { command } => match command {
+            BottleCommand::Create(args) => create_bottle(cli.fvs2d, args).await?,
+            BottleCommand::List => {
+                for bottle in bottle_manager(cli.fvs2d)?.list()? {
+                    println!(
+                        "{}\t{}\t{:?}\t{}",
+                        bottle.id(),
+                        bottle.name(),
+                        bottle.r#type(),
+                        bottle.runner().version()
+                    );
                 }
             }
-            SystemSubcommands::Notify { message } => {
-                println!("Action: SystemNotify | Message: {}", message);
-                let request = NotifyRequest { message };
-                let response = client.notify(request).await?;
-                let response = response.get_ref();
-                if response.success {
-                    tracing::info!("Message sent successfully");
-                } else {
-                    tracing::info!("Failed to send message");
+            BottleCommand::Manage(args) => manage_bottle(cli.fvs2d, args).await?,
+        },
+    }
+
+    Ok(())
+}
+
+async fn create_bottle(fvs2d: Option<PathBuf>, args: CreateArgs) -> Result<()> {
+    let manager = bottle_manager(fvs2d)?;
+    let components = ComponentManager::new()?;
+    let runner = find_component(&components, &args.runner)?;
+    let winebridge = find_component(&components, &args.winebridge)?;
+    let bottle = manager
+        .create(args.name, args.storage.bottle_type(), runner, winebridge)
+        .await?;
+    print_bottle(&bottle);
+    Ok(())
+}
+
+async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
+    let manager = bottle_manager(fvs2d)?;
+    let mut bottle = find_bottle(&manager, &args.bottle)?;
+    match args.command {
+        ManageCommand::Show => print_bottle(&bottle),
+        ManageCommand::Delete => manager.delete(bottle.id()).await?,
+        ManageCommand::Stop => bottle.stop().await?,
+        ManageCommand::Processes => {
+            for process in bottle.processes().await? {
+                println!("{}\t{}\t{}", process.pid, process.name, process.threads);
+            }
+        }
+        ManageCommand::Install { command } => {
+            match command {
+                InstallCommand::Component { component } => {
+                    let components = ComponentManager::new()?;
+                    bottle
+                        .install_component(find_component(&components, &component)?)
+                        .await?;
                 }
+                InstallCommand::Dependency { dependency } => {
+                    let dependencies = DependencyManager::new()?;
+                    bottle
+                        .install_dependency(find_dependency(&dependencies, &dependency)?)
+                        .await?;
+                }
+            }
+            print_bottle(&bottle);
+        }
+        ManageCommand::Uninstall { command } => {
+            match command {
+                UninstallCommand::Component { component } => {
+                    bottle.uninstall_component(component.parse()?).await?;
+                }
+            }
+            print_bottle(&bottle);
+        }
+        ManageCommand::Program { command } => match command {
+            ProgramCommand::Add(args) => {
+                let mut program = Program::new(args.name, args.executable);
+                program.args = args.arguments;
+                program.working_directory = args.working_directory;
+                program.new_console = args.new_console;
+                let id = program.id;
+                bottle.add_program(program)?;
+                println!("{id}");
+            }
+            ProgramCommand::Launch { program } => {
+                let id = bottle
+                    .programs()
+                    .iter()
+                    .find(|candidate| candidate.id.to_string() == program)
+                    .map(|program| program.id)
+                    .ok_or_else(|| missing("program", &program))?;
+                println!("{}", bottle.run(id).await?);
             }
         },
     }
     Ok(())
 }
 
-fn parse_layer(spec: &str) -> Layer {
-    if let Some((repo, state)) = spec.rsplit_once('@') {
-        return Layer::new(repo).state(state);
-    }
-    if let Some((repo, branch)) = spec.rsplit_once('#') {
-        return Layer::new(repo).branch(branch);
-    }
-    Layer::new(spec)
+fn bottle_manager(fvs2d: Option<PathBuf>) -> Result<BottleManager> {
+    Ok(BottleManager::new(fvs2d)?)
 }
 
-async fn run_virgo(args: VirgoArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let owned = args.connect.is_none();
-    let daemon = match (args.connect, args.fvs2d) {
-        (Some(addr), _) => VirgoDaemon::connect(addr).await?,
-        (None, Some(bin)) => VirgoDaemon::spawn(bin).await?,
-        (None, None) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "pass --fvs2d to spawn a daemon or --connect to reach a running one",
-            )
-            .into());
-        }
-    };
+fn find_component<'a>(manager: &'a ComponentManager, id: &str) -> io::Result<&'a Component> {
+    manager
+        .components()
+        .iter()
+        .find(|component| component.id().to_string() == id)
+        .ok_or_else(|| missing("component", id))
+}
 
-    let result = match args.command {
-        VirgoSubcommands::Probe => {
-            let info = daemon.probe().await?;
-            println!(
-                "version={} pid={} dev_fuse={} fusermount={} flatpak={}",
-                info.daemon_version,
-                info.pid,
-                info.dev_fuse_accessible,
-                info.fusermount_available,
-                info.running_in_flatpak
-            );
-            Ok(())
-        }
-        VirgoSubcommands::Init { prefix } => {
-            let repo = daemon.init_repository(prefix).await?;
-            println!("initialized {}", repo.repository_path);
-            Ok(())
-        }
-        VirgoSubcommands::Snapshot { prefix, message } => {
-            let revision = daemon.create_restore_point(prefix, message).await?;
-            println!(
-                "restore point {}",
-                &revision.state_id[..12.min(revision.state_id.len())]
-            );
-            Ok(())
-        }
-        VirgoSubcommands::States { prefix } => {
-            let states = daemon.list_commits(prefix).await?;
-            if states.is_empty() {
-                println!("(no restore points)");
-            }
-            for state in states {
-                let label = if state.message.is_empty() {
-                    "(no label)"
-                } else {
-                    &state.message
-                };
-                println!(
-                    "{}  {}",
-                    &state.state_id[..12.min(state.state_id.len())],
-                    label
-                );
-            }
-            Ok(())
-        }
-        VirgoSubcommands::Rollback { prefix, state } => {
-            let restored = daemon.rollback(prefix, state).await?;
-            println!(
-                "rolled back to {} in {}",
-                &restored.state_id[..12.min(restored.state_id.len())],
-                restored.destination_path
-            );
-            Ok(())
-        }
-        VirgoSubcommands::Mount {
-            mount_point,
-            layers,
-            upper,
-        } => {
-            if owned {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "mount requires --connect: the mount lives as long as the daemon",
-                )
-                .into());
-            }
-            let layers = layers.iter().map(|s| parse_layer(s)).collect();
-            let mount = daemon.create_mount(mount_point, layers, upper).await?;
-            println!(
-                "mounted {} at {} (nodes {})",
-                mount.id,
-                mount.spec.map(|s| s.mount_point).unwrap_or_default(),
-                mount.node_count
-            );
-            Ok(())
-        }
-        VirgoSubcommands::Mounts => {
-            let mounts = daemon.list_mounts().await?;
-            if mounts.is_empty() {
-                println!("(no mounts)");
-            }
-            for mount in mounts {
-                println!(
-                    "{}  {}",
-                    mount.id,
-                    mount.spec.map(|s| s.mount_point).unwrap_or_default()
-                );
-            }
-            Ok(())
-        }
-        VirgoSubcommands::Unmount { mount_id, lazy } => {
-            daemon.unmount(mount_id, lazy).await?;
-            println!("unmounted");
-            Ok(())
-        }
-    };
+fn find_dependency<'a>(manager: &'a DependencyManager, id: &str) -> io::Result<&'a Dependency> {
+    manager
+        .dependencies()
+        .iter()
+        .find(|dependency| dependency.id().to_string() == id)
+        .ok_or_else(|| missing("dependency", id))
+}
 
-    if owned {
-        daemon.shutdown().await?;
+fn find_bottle(manager: &BottleManager, selector: &str) -> Result<Bottle> {
+    Ok(manager
+        .list()?
+        .into_iter()
+        .find(|bottle| bottle.id().to_string() == selector || bottle.name() == selector)
+        .ok_or_else(|| missing("bottle", selector))?)
+}
+
+fn missing(kind: &str, value: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("{kind} not found: {value}"),
+    )
+}
+
+fn print_component(component: &Component) {
+    println!(
+        "{}\t{:?}\t{}\t{}",
+        component.id(),
+        component.kind(),
+        component.version(),
+        component.path().display()
+    );
+}
+
+fn print_bottle(bottle: &Bottle) {
+    println!("id: {}", bottle.id());
+    println!("name: {}", bottle.name());
+    println!("storage: {:?}", bottle.r#type());
+    print_bottle_component("runner", bottle.runner());
+    print_bottle_component("winebridge", bottle.components().winebridge());
+    if let Some(component) = bottle.components().umu() {
+        print_bottle_component("umu", component);
     }
-    result
+    for (name, component) in [
+        ("dxvk", bottle.components().dxvk()),
+        ("vkd3d", bottle.components().vkd3d()),
+        ("nvapi", bottle.components().nvapi()),
+        ("latency-flex", bottle.components().latency_flex()),
+    ] {
+        if let Some(component) = component {
+            print_bottle_component(name, component);
+        }
+    }
+    for dependency in bottle.dependencies() {
+        println!(
+            "dependency: {} {} {}",
+            dependency.id(),
+            dependency.name(),
+            dependency.version()
+        );
+    }
+    for program in bottle.programs() {
+        println!(
+            "program: {} {} {}",
+            program.id, program.name, program.executable
+        );
+    }
+}
+
+fn print_bottle_component(name: &str, component: &Component) {
+    println!(
+        "{name}: {} {} {}",
+        component.id(),
+        component.version(),
+        component.path().display()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_grouped_bottle_commands() {
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "program",
+            "add",
+            "Game",
+            "C:\\game.exe",
+            "--arg",
+            "--windowed",
+        ])
+        .unwrap();
+
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        let ManageCommand::Program {
+            command: ProgramCommand::Add(program),
+        } = args.command
+        else {
+            panic!("expected program add command");
+        };
+        assert_eq!(args.bottle, "test");
+        assert_eq!(program.arguments, ["--windowed"]);
+    }
+
+    #[test]
+    fn parses_component_and_dependency_install_commands() {
+        for (kind, id) in [
+            ("component", "component-id"),
+            ("dependency", "dependency-id"),
+        ] {
+            let cli =
+                Cli::try_parse_from(["bottles", "bottle", "manage", "test", "install", kind, id])
+                    .unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(args.command, ManageCommand::Install { .. }));
+        }
+    }
+
+    #[test]
+    fn parses_component_uninstall_command() {
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "uninstall",
+            "component",
+            "component-id",
+        ])
+        .unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(
+            args.command,
+            ManageCommand::Uninstall {
+                command: UninstallCommand::Component { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_processes_command() {
+        let cli =
+            Cli::try_parse_from(["bottles", "bottle", "manage", "test", "processes"]).unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(args.command, ManageCommand::Processes));
+    }
+
+    #[test]
+    fn parses_stop_command() {
+        let cli = Cli::try_parse_from(["bottles", "bottle", "manage", "test", "stop"]).unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(args.command, ManageCommand::Stop));
+    }
 }
