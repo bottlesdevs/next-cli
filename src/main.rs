@@ -70,6 +70,10 @@ enum ManageCommand {
         #[command(subcommand)]
         command: ProgramCommand,
     },
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -102,6 +106,18 @@ enum ProgramCommand {
     Kill {
         #[arg(value_name = "UUID")]
         program: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommand {
+    Create {
+        message: String,
+    },
+    List,
+    Restore {
+        #[arg(value_name = "STATE_ID_OR_PREFIX")]
+        state: String,
     },
 }
 
@@ -254,11 +270,30 @@ async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
                 bottle.kill(id).await?;
             }
         },
+        ManageCommand::Snapshot { command } => match command {
+            SnapshotCommand::Create { message } => {
+                println!("{}", bottle.create_snapshot(message).await?.state_id);
+            }
+            SnapshotCommand::List => {
+                for snapshot in bottle.snapshots().await? {
+                    println!("{}\t{}", snapshot.state_id, snapshot.message);
+                }
+            }
+            SnapshotCommand::Restore { state } => {
+                println!("{}", bottle.rollback(&state).await?);
+            }
+        },
     }
     Ok(())
 }
 
 fn bottle_manager(fvs2d: Option<PathBuf>) -> Result<BottleManager> {
+    let fvs2d = fvs2d.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--fvs2d is required for bottle commands",
+        )
+    })?;
     Ok(BottleManager::new(fvs2d)?)
 }
 
@@ -486,5 +521,25 @@ mod tests {
             panic!("expected bottle manage command");
         };
         assert!(matches!(args.command, ManageCommand::Stop));
+    }
+
+    #[test]
+    fn parses_snapshot_commands() {
+        for command in [
+            &["snapshot", "create", "before-upgrade"][..],
+            &["snapshot", "list"][..],
+            &["snapshot", "restore", "abc123"][..],
+        ] {
+            let mut args = vec!["bottles", "bottle", "manage", "test"];
+            args.extend_from_slice(command);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(args.command, ManageCommand::Snapshot { .. }));
+        }
     }
 }
