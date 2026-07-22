@@ -1,7 +1,10 @@
 use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
-    bottle::{Bottle, BottleManager, BottleType, Program},
+    bottle::{
+        Bottle, BottleManager, BottleType, GamescopeConfig, GamescopeFilter, GamescopeScaler,
+        Program,
+    },
     compatibility::{
         components::{Component, ComponentManager},
         dependencies::{Dependency, DependencyManager},
@@ -74,6 +77,10 @@ enum ManageCommand {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    Wrappers {
+        #[command(subcommand)]
+        command: WrappersCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -119,6 +126,120 @@ enum SnapshotCommand {
         #[arg(value_name = "STATE_ID_OR_PREFIX")]
         state: String,
     },
+}
+
+#[derive(Subcommand)]
+enum WrappersCommand {
+    Gamescope {
+        #[command(subcommand)]
+        command: GamescopeCommand,
+    },
+    Mangohud {
+        #[command(subcommand)]
+        command: MangohudCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GamescopeCommand {
+    Show,
+    Enable,
+    Disable,
+    Configure(GamescopeArgs),
+}
+
+#[derive(Subcommand)]
+enum MangohudCommand {
+    Show,
+    Enable,
+    Disable,
+}
+
+#[derive(Args)]
+struct GamescopeArgs {
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    game_width: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    game_height: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    output_width: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    output_height: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    frame_rate: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    unfocused_frame_rate: Option<u32>,
+    #[arg(long, value_enum)]
+    scaler: Option<CliGamescopeScaler>,
+    #[arg(long, value_enum)]
+    filter: Option<CliGamescopeFilter>,
+    #[arg(long)]
+    sharpness: Option<u8>,
+    #[arg(long)]
+    borderless: bool,
+    #[arg(long)]
+    fullscreen: bool,
+}
+
+impl GamescopeArgs {
+    fn config(self, enabled: bool) -> GamescopeConfig {
+        GamescopeConfig {
+            enabled,
+            game_width: self.game_width,
+            game_height: self.game_height,
+            output_width: self.output_width,
+            output_height: self.output_height,
+            frame_rate: self.frame_rate,
+            unfocused_frame_rate: self.unfocused_frame_rate,
+            scaler: self.scaler.map(Into::into),
+            filter: self.filter.map(Into::into),
+            sharpness: self.sharpness,
+            borderless: self.borderless,
+            fullscreen: self.fullscreen,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliGamescopeScaler {
+    Auto,
+    Integer,
+    Fit,
+    Fill,
+    Stretch,
+}
+
+impl From<CliGamescopeScaler> for GamescopeScaler {
+    fn from(value: CliGamescopeScaler) -> Self {
+        match value {
+            CliGamescopeScaler::Auto => Self::Auto,
+            CliGamescopeScaler::Integer => Self::Integer,
+            CliGamescopeScaler::Fit => Self::Fit,
+            CliGamescopeScaler::Fill => Self::Fill,
+            CliGamescopeScaler::Stretch => Self::Stretch,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliGamescopeFilter {
+    Linear,
+    Nearest,
+    Fsr,
+    Nis,
+    Pixel,
+}
+
+impl From<CliGamescopeFilter> for GamescopeFilter {
+    fn from(value: CliGamescopeFilter) -> Self {
+        match value {
+            CliGamescopeFilter::Linear => Self::Linear,
+            CliGamescopeFilter::Nearest => Self::Nearest,
+            CliGamescopeFilter::Fsr => Self::Fsr,
+            CliGamescopeFilter::Nis => Self::Nis,
+            CliGamescopeFilter::Pixel => Self::Pixel,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -283,6 +404,50 @@ async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
                 println!("{}", bottle.rollback(&state).await?);
             }
         },
+        ManageCommand::Wrappers { command } => manage_wrappers(&mut bottle, command).await?,
+    }
+    Ok(())
+}
+
+async fn manage_wrappers(bottle: &mut Bottle, command: WrappersCommand) -> Result<()> {
+    match command {
+        WrappersCommand::Gamescope { command } => {
+            match command {
+                GamescopeCommand::Show => {}
+                GamescopeCommand::Enable => {
+                    let mut wrappers = bottle.wrappers().clone();
+                    wrappers.gamescope.enabled = true;
+                    bottle.set_wrappers(wrappers).await?;
+                }
+                GamescopeCommand::Disable => {
+                    let mut wrappers = bottle.wrappers().clone();
+                    wrappers.gamescope.enabled = false;
+                    bottle.set_wrappers(wrappers).await?;
+                }
+                GamescopeCommand::Configure(args) => {
+                    let mut wrappers = bottle.wrappers().clone();
+                    wrappers.gamescope = args.config(wrappers.gamescope.enabled);
+                    bottle.set_wrappers(wrappers).await?;
+                }
+            }
+            println!("{:#?}", bottle.wrappers().gamescope);
+        }
+        WrappersCommand::Mangohud { command } => {
+            match command {
+                MangohudCommand::Show => {}
+                MangohudCommand::Enable => {
+                    let mut wrappers = bottle.wrappers().clone();
+                    wrappers.mangohud.enabled = true;
+                    bottle.set_wrappers(wrappers).await?;
+                }
+                MangohudCommand::Disable => {
+                    let mut wrappers = bottle.wrappers().clone();
+                    wrappers.mangohud.enabled = false;
+                    bottle.set_wrappers(wrappers).await?;
+                }
+            }
+            println!("{:#?}", bottle.wrappers().mangohud);
+        }
     }
     Ok(())
 }
@@ -541,5 +706,93 @@ mod tests {
             };
             assert!(matches!(args.command, ManageCommand::Snapshot { .. }));
         }
+    }
+
+    #[test]
+    fn parses_wrapper_commands_and_validates_gamescope_values() {
+        for command in [
+            &["gamescope", "show"][..],
+            &["gamescope", "enable"][..],
+            &["gamescope", "disable"][..],
+            &["mangohud", "show"][..],
+            &["mangohud", "enable"][..],
+            &["mangohud", "disable"][..],
+        ] {
+            let mut args = vec!["bottles", "bottle", "manage", "test", "wrappers"];
+            args.extend_from_slice(command);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(args.command, ManageCommand::Wrappers { .. }));
+        }
+
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "wrappers",
+            "gamescope",
+            "configure",
+            "--game-width",
+            "1280",
+            "--game-height",
+            "720",
+            "--output-width",
+            "1920",
+            "--output-height",
+            "1080",
+            "--frame-rate",
+            "60",
+            "--unfocused-frame-rate",
+            "30",
+            "--scaler",
+            "fit",
+            "--filter",
+            "fsr",
+            "--sharpness",
+            "5",
+            "--borderless",
+            "--fullscreen",
+        ])
+        .unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        let ManageCommand::Wrappers {
+            command:
+                WrappersCommand::Gamescope {
+                    command: GamescopeCommand::Configure(args),
+                },
+        } = args.command
+        else {
+            panic!("expected gamescope configure command");
+        };
+        assert_eq!(args.game_width, Some(1280));
+        assert_eq!(args.unfocused_frame_rate, Some(30));
+        assert!(args.borderless);
+        assert!(args.fullscreen);
+
+        assert!(
+            Cli::try_parse_from([
+                "bottles",
+                "bottle",
+                "manage",
+                "test",
+                "wrappers",
+                "gamescope",
+                "configure",
+                "--game-width",
+                "0",
+            ])
+            .is_err()
+        );
     }
 }
