@@ -99,6 +99,10 @@ enum ProgramCommand {
         #[arg(value_name = "UUID")]
         program: String,
     },
+    Kill {
+        #[arg(value_name = "UUID")]
+        program: String,
+    },
 }
 
 #[derive(Args)]
@@ -242,13 +246,12 @@ async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
                 println!("{id}");
             }
             ProgramCommand::Launch { program } => {
-                let id = bottle
-                    .programs()
-                    .iter()
-                    .find(|candidate| candidate.id.to_string() == program)
-                    .map(|program| program.id)
-                    .ok_or_else(|| missing("program", &program))?;
+                let id = find_program(&bottle, &program)?.id;
                 println!("{}", bottle.run(id).await?);
+            }
+            ProgramCommand::Kill { program } => {
+                let id = find_program(&bottle, &program)?.id;
+                bottle.kill(id).await?;
             }
         },
     }
@@ -273,6 +276,14 @@ fn find_dependency<'a>(manager: &'a DependencyManager, id: &str) -> io::Result<&
         .iter()
         .find(|dependency| dependency.id().to_string() == id)
         .ok_or_else(|| missing("dependency", id))
+}
+
+fn find_program<'a>(bottle: &'a Bottle, id: &str) -> io::Result<&'a Program> {
+    bottle
+        .programs()
+        .iter()
+        .find(|program| program.id.to_string() == id)
+        .ok_or_else(|| missing("program", id))
 }
 
 fn find_bottle(manager: &BottleManager, selector: &str) -> Result<Bottle> {
@@ -378,6 +389,33 @@ mod tests {
         };
         assert_eq!(args.bottle, "test");
         assert_eq!(program.arguments, ["--windowed"]);
+    }
+
+    #[test]
+    fn parses_program_kill_command() {
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "program",
+            "kill",
+            "program-id",
+        ])
+        .unwrap();
+
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(
+            args.command,
+            ManageCommand::Program {
+                command: ProgramCommand::Kill { program }
+            } if program == "program-id"
+        ));
     }
 
     #[test]
