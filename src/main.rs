@@ -3,8 +3,8 @@ use std::{error::Error, io, path::PathBuf};
 use bottles_core::{
     Context, Directories,
     bottle::{
-        Bottle, BottleManager, BottleType, GamescopeConfig, GamescopeFilter, GamescopeScaler,
-        Program,
+        Bottle, BottleManager, BottleType, DllOverride, DllOverrideMode, GamescopeConfig,
+        GamescopeFilter, GamescopeScaler, Program,
     },
     compatibility::{
         components::{Component, ComponentManager},
@@ -78,6 +78,10 @@ enum ManageCommand {
         #[command(subcommand)]
         command: EnvCommand,
     },
+    DllOverrides {
+        #[command(subcommand)]
+        command: DllOverridesCommand,
+    },
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -128,6 +132,40 @@ enum EnvCommand {
     List,
     Set { key: String, value: String },
     Unset { key: String },
+}
+
+#[derive(Subcommand)]
+enum DllOverridesCommand {
+    List,
+    Set {
+        dll: String,
+        #[arg(value_enum)]
+        mode: CliDllOverrideMode,
+    },
+    Unset {
+        dll: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliDllOverrideMode {
+    NativeBuiltin,
+    BuiltinNative,
+    Native,
+    Builtin,
+    Disabled,
+}
+
+impl From<CliDllOverrideMode> for DllOverrideMode {
+    fn from(value: CliDllOverrideMode) -> Self {
+        match value {
+            CliDllOverrideMode::NativeBuiltin => Self::NativeBuiltin,
+            CliDllOverrideMode::BuiltinNative => Self::BuiltinNative,
+            CliDllOverrideMode::Native => Self::Native,
+            CliDllOverrideMode::Builtin => Self::Builtin,
+            CliDllOverrideMode::Disabled => Self::Disabled,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -453,6 +491,9 @@ async fn manage_bottle(
             EnvCommand::Set { key, value } => bottle.set_env(key, value).await?,
             EnvCommand::Unset { key } => bottle.unset_env(key).await?,
         },
+        ManageCommand::DllOverrides { command } => {
+            manage_dll_overrides(&mut bottle, command).await?
+        }
         ManageCommand::Snapshot { command } => match command {
             SnapshotCommand::Create { message } => {
                 println!("{}", bottle.create_snapshot(message).await?.state_id);
@@ -469,6 +510,44 @@ async fn manage_bottle(
         ManageCommand::Wrappers { command } => manage_wrappers(&mut bottle, command).await?,
     }
     Ok(())
+}
+
+async fn manage_dll_overrides(bottle: &mut Bottle, command: DllOverridesCommand) -> Result<()> {
+    match command {
+        DllOverridesCommand::List => {
+            let mut overrides = bottle.dll_overrides().await?;
+            overrides.sort_unstable_by(|left, right| left.dll().cmp(right.dll()));
+            for dll_override in &overrides {
+                print_dll_override(dll_override);
+            }
+        }
+        DllOverridesCommand::Set { dll, mode } => {
+            bottle.set_dll_override(dll, mode.into()).await?;
+        }
+        DllOverridesCommand::Unset { dll } => {
+            bottle.unset_dll_override(dll).await?;
+        }
+    }
+    Ok(())
+}
+
+fn print_dll_override(dll_override: &DllOverride) {
+    println!(
+        "{}\t{}",
+        dll_override.dll(),
+        dll_override_mode_name(dll_override.mode())
+    );
+}
+
+fn dll_override_mode_name(mode: DllOverrideMode) -> &'static str {
+    match mode {
+        DllOverrideMode::Unspecified => "unspecified",
+        DllOverrideMode::NativeBuiltin => "native-builtin",
+        DllOverrideMode::BuiltinNative => "builtin-native",
+        DllOverrideMode::Native => "native",
+        DllOverrideMode::Builtin => "builtin",
+        DllOverrideMode::Disabled => "disabled",
+    }
 }
 
 async fn manage_wrappers(bottle: &mut Bottle, command: WrappersCommand) -> Result<()> {
@@ -836,6 +915,54 @@ mod tests {
                 command: EnvCommand::Set { key, value }
             } if key == "WAYLAND_DISPLAY" && value.is_empty()
         ));
+    }
+
+    #[test]
+    fn parses_dll_override_commands_and_modes() {
+        for command in [&["list"][..], &["unset", "d3d11"][..]] {
+            let mut args = vec!["bottles", "bottle", "manage", "test", "dll-overrides"];
+            args.extend_from_slice(command);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(args.command, ManageCommand::DllOverrides { .. }));
+        }
+
+        for (name, expected) in [
+            ("native-builtin", DllOverrideMode::NativeBuiltin),
+            ("builtin-native", DllOverrideMode::BuiltinNative),
+            ("native", DllOverrideMode::Native),
+            ("builtin", DllOverrideMode::Builtin),
+            ("disabled", DllOverrideMode::Disabled),
+        ] {
+            let cli = Cli::try_parse_from([
+                "bottles",
+                "bottle",
+                "manage",
+                "test",
+                "dll-overrides",
+                "set",
+                "d3d11",
+                name,
+            ])
+            .unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(
+                args.command,
+                ManageCommand::DllOverrides {
+                    command: DllOverridesCommand::Set { dll, mode }
+                } if dll == "d3d11" && DllOverrideMode::from(mode) == expected
+            ));
+        }
     }
 
     #[test]
