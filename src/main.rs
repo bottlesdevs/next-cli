@@ -74,6 +74,10 @@ enum ManageCommand {
         #[command(subcommand)]
         command: ProgramCommand,
     },
+    Env {
+        #[command(subcommand)]
+        command: EnvCommand,
+    },
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -117,6 +121,13 @@ enum ProgramCommand {
         #[arg(value_name = "UUID")]
         program: String,
     },
+}
+
+#[derive(Subcommand)]
+enum EnvCommand {
+    List,
+    Set { key: String, value: String },
+    Unset { key: String },
 }
 
 #[derive(Subcommand)]
@@ -419,7 +430,7 @@ async fn manage_bottle(
                 program.working_directory = args.working_directory;
                 program.new_console = args.new_console;
                 let id = program.id;
-                bottle.add_program(program)?;
+                bottle.add_program(program).await?;
                 println!("{id}");
             }
             ProgramCommand::Launch { program } => {
@@ -430,6 +441,17 @@ async fn manage_bottle(
                 let id = find_program(&bottle, &program)?.id;
                 bottle.kill(id).await?;
             }
+        },
+        ManageCommand::Env { command } => match command {
+            EnvCommand::List => {
+                let mut environment = bottle.environment().iter().collect::<Vec<_>>();
+                environment.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                for (key, value) in environment {
+                    println!("{key}={value}");
+                }
+            }
+            EnvCommand::Set { key, value } => bottle.set_env(key, value).await?,
+            EnvCommand::Unset { key } => bottle.unset_env(key).await?,
         },
         ManageCommand::Snapshot { command } => match command {
             SnapshotCommand::Create { message } => {
@@ -774,6 +796,46 @@ mod tests {
             };
             assert!(matches!(args.command, ManageCommand::Snapshot { .. }));
         }
+    }
+
+    #[test]
+    fn parses_environment_commands_and_empty_values() {
+        for command in [&["list"][..], &["unset", "WAYLAND_DISPLAY"][..]] {
+            let mut args = vec!["bottles", "bottle", "manage", "test", "env"];
+            args.extend_from_slice(command);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Bottle {
+                command: BottleCommand::Manage(args),
+            } = cli.command
+            else {
+                panic!("expected bottle manage command");
+            };
+            assert!(matches!(args.command, ManageCommand::Env { .. }));
+        }
+
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "env",
+            "set",
+            "WAYLAND_DISPLAY",
+            "",
+        ])
+        .unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(
+            args.command,
+            ManageCommand::Env {
+                command: EnvCommand::Set { key, value }
+            } if key == "WAYLAND_DISPLAY" && value.is_empty()
+        ));
     }
 
     #[test]
