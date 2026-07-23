@@ -1,6 +1,7 @@
 use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
+    Context, Directories,
     bottle::{
         Bottle, BottleManager, BottleType, GamescopeConfig, GamescopeFilter, GamescopeScaler,
         Program,
@@ -88,6 +89,8 @@ enum InstallCommand {
     Component {
         #[arg(value_name = "UUID")]
         component: String,
+        #[arg(long, value_name = "UUID")]
+        umu: Option<String>,
     },
     Dependency {
         #[arg(value_name = "UUID")]
@@ -266,6 +269,9 @@ struct CreateArgs {
 
     #[arg(long, value_name = "UUID")]
     winebridge: String,
+
+    #[arg(long, value_name = "UUID")]
+    umu: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -286,15 +292,16 @@ impl Storage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let directories = Directories::for_project("bottles-next")?;
 
     match cli.command {
         Command::Components => {
-            for component in ComponentManager::new()?.components() {
+            for component in ComponentManager::load(&directories)?.components() {
                 print_component(component);
             }
         }
         Command::Dependencies => {
-            for dependency in DependencyManager::new()?.dependencies() {
+            for dependency in DependencyManager::load(&directories)?.dependencies() {
                 println!(
                     "{}\t{}\t{}",
                     dependency.id(),
@@ -303,41 +310,61 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Command::Bottle { command } => match command {
-            BottleCommand::Create(args) => create_bottle(cli.fvs2d, args).await?,
-            BottleCommand::List => {
-                for bottle in bottle_manager(cli.fvs2d)?.list()? {
-                    println!(
-                        "{}\t{}\t{:?}\t{}",
-                        bottle.id(),
-                        bottle.name(),
-                        bottle.r#type(),
-                        bottle.runner().version()
-                    );
+        Command::Bottle { command } => {
+            let manager = bottle_manager(directories.clone(), cli.fvs2d)?;
+            match command {
+                BottleCommand::Create(args) => create_bottle(&manager, &directories, args).await?,
+                BottleCommand::List => {
+                    for bottle in manager.list()? {
+                        println!(
+                            "{}\t{}\t{:?}\t{}",
+                            bottle.id(),
+                            bottle.name(),
+                            bottle.r#type(),
+                            bottle.runner().version()
+                        );
+                    }
                 }
+                BottleCommand::Manage(args) => manage_bottle(&manager, &directories, args).await?,
             }
-            BottleCommand::Manage(args) => manage_bottle(cli.fvs2d, args).await?,
-        },
+        }
     }
 
     Ok(())
 }
 
-async fn create_bottle(fvs2d: Option<PathBuf>, args: CreateArgs) -> Result<()> {
-    let manager = bottle_manager(fvs2d)?;
-    let components = ComponentManager::new()?;
+async fn create_bottle(
+    manager: &BottleManager,
+    directories: &Directories,
+    args: CreateArgs,
+) -> Result<()> {
+    let components = ComponentManager::load(directories)?;
     let runner = find_component(&components, &args.runner)?;
     let winebridge = find_component(&components, &args.winebridge)?;
+    let umu = args
+        .umu
+        .as_deref()
+        .map(|id| find_component(&components, id))
+        .transpose()?;
     let bottle = manager
-        .create(args.name, args.storage.bottle_type(), runner, winebridge)
+        .create(
+            args.name,
+            args.storage.bottle_type(),
+            runner,
+            winebridge,
+            umu,
+        )
         .await?;
     print_bottle(&bottle);
     Ok(())
 }
 
-async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
-    let manager = bottle_manager(fvs2d)?;
-    let mut bottle = find_bottle(&manager, &args.bottle)?;
+async fn manage_bottle(
+    manager: &BottleManager,
+    directories: &Directories,
+    args: ManageArgs,
+) -> Result<()> {
+    let mut bottle = find_bottle(manager, &args.bottle)?;
     match args.command {
         ManageCommand::Show => print_bottle(&bottle),
         ManageCommand::Delete => manager.delete(bottle.id()).await?,
@@ -349,14 +376,27 @@ async fn manage_bottle(fvs2d: Option<PathBuf>, args: ManageArgs) -> Result<()> {
         }
         ManageCommand::Install { command } => {
             match command {
-                InstallCommand::Component { component } => {
-                    let components = ComponentManager::new()?;
-                    bottle
-                        .install_component(find_component(&components, &component)?)
-                        .await?;
+                InstallCommand::Component { component, umu } => {
+                    let components = ComponentManager::load(directories)?;
+                    let component = find_component(&components, &component)?;
+                    let umu = umu
+                        .as_deref()
+                        .map(|id| find_component(&components, id))
+                        .transpose()?;
+                    if component.kind().is_runner() {
+                        bottle.install_runner(component, umu).await?;
+                    } else if umu.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--umu is only valid when installing a runner",
+                        )
+                        .into());
+                    } else {
+                        bottle.install_component(component).await?;
+                    }
                 }
                 InstallCommand::Dependency { dependency } => {
-                    let dependencies = DependencyManager::new()?;
+                    let dependencies = DependencyManager::load(directories)?;
                     bottle
                         .install_dependency(find_dependency(&dependencies, &dependency)?)
                         .await?;
@@ -452,14 +492,14 @@ async fn manage_wrappers(bottle: &mut Bottle, command: WrappersCommand) -> Resul
     Ok(())
 }
 
-fn bottle_manager(fvs2d: Option<PathBuf>) -> Result<BottleManager> {
+fn bottle_manager(directories: Directories, fvs2d: Option<PathBuf>) -> Result<BottleManager> {
     let fvs2d = fvs2d.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "--fvs2d is required for bottle commands",
         )
     })?;
-    Ok(BottleManager::new(fvs2d)?)
+    Ok(BottleManager::new(Context::new(directories, fvs2d)?))
 }
 
 fn find_component<'a>(manager: &'a ComponentManager, id: &str) -> io::Result<&'a Component> {
@@ -635,6 +675,34 @@ mod tests {
             };
             assert!(matches!(args.command, ManageCommand::Install { .. }));
         }
+
+        let cli = Cli::try_parse_from([
+            "bottles",
+            "bottle",
+            "manage",
+            "test",
+            "install",
+            "component",
+            "runner-id",
+            "--umu",
+            "umu-id",
+        ])
+        .unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(
+            args.command,
+            ManageCommand::Install {
+                command: InstallCommand::Component {
+                    component,
+                    umu: Some(umu),
+                }
+            } if component == "runner-id" && umu == "umu-id"
+        ));
     }
 
     #[test]
