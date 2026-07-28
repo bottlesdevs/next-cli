@@ -1,25 +1,20 @@
-use std::{error::Error, io, path::PathBuf};
+use std::{error::Error, fmt::Debug, io, path::PathBuf};
 
 use bottles_core::{
-    Context, Directories,
-    bottle::{
-        Bottle, BottleManager, BottleType, DllOverride, DllOverrideMode, GamescopeConfig,
-        GamescopeFilter, GamescopeScaler, Program,
-    },
-    compatibility::{
-        components::{Component, ComponentManager},
-        dependencies::{Dependency, DependencyManager},
-    },
+    Bottle, BottleManager, BottleType, Component, ComponentKind, ComponentManager, Core,
+    Dependency, DependencyManager, DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter,
+    GamescopeScaler, Operation, Paths, Program, RunnerKind, RunnerSelection,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use futures_util::StreamExt;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Parser)]
-#[command(version, about = "Bottles Next test CLI")]
+#[command(version, about = "Bottles Next CLI")]
 struct Cli {
-    #[arg(long, global = true, value_name = "PATH")]
-    fvs2d: Option<PathBuf>,
+    #[arg(long, global = true, value_name = "PATH", default_value = "fvs2d")]
+    fvs2d: PathBuf,
 
     #[command(subcommand)]
     command: Command,
@@ -341,16 +336,17 @@ impl Storage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let directories = Directories::for_project("bottles-next")?;
+    let paths = Paths::for_project("bottles-next").await?;
+    let core = Core::open(paths, cli.fvs2d).await?;
 
     match cli.command {
         Command::Components => {
-            for component in ComponentManager::load(&directories)?.components() {
+            for component in core.components().components() {
                 print_component(component);
             }
         }
         Command::Dependencies => {
-            for dependency in DependencyManager::load(&directories)?.dependencies() {
+            for dependency in core.dependencies().dependencies() {
                 println!(
                     "{}\t{}\t{}",
                     dependency.id(),
@@ -359,64 +355,55 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Command::Bottle { command } => {
-            let manager = bottle_manager(directories.clone(), cli.fvs2d)?;
-            match command {
-                BottleCommand::Create(args) => create_bottle(&manager, &directories, args).await?,
-                BottleCommand::List => {
-                    for bottle in manager.list()? {
-                        println!(
-                            "{}\t{}\t{:?}\t{}",
-                            bottle.id(),
-                            bottle.name(),
-                            bottle.r#type(),
-                            bottle.runner().version()
-                        );
-                    }
+        Command::Bottle { command } => match command {
+            BottleCommand::Create(args) => create_bottle(&core, args).await?,
+            BottleCommand::List => {
+                for bottle in core.bottles().list().await? {
+                    let bottle = bottle?;
+                    let state = bottle.state()?;
+                    println!(
+                        "{}\t{}\t{:?}\t{}",
+                        state.id(),
+                        state.name(),
+                        state.kind(),
+                        state.runner().runner().version()
+                    );
                 }
-                BottleCommand::Manage(args) => manage_bottle(&manager, &directories, args).await?,
             }
-        }
+            BottleCommand::Manage(args) => manage_bottle(&core, args).await?,
+        },
     }
 
     Ok(())
 }
 
-async fn create_bottle(
-    manager: &BottleManager,
-    directories: &Directories,
-    args: CreateArgs,
-) -> Result<()> {
-    let components = ComponentManager::load(directories)?;
-    let runner = find_component(&components, &args.runner)?;
-    let winebridge = find_component(&components, &args.winebridge)?;
+async fn create_bottle(core: &Core, args: CreateArgs) -> Result<()> {
+    let runner = find_component(core.components(), &args.runner)?;
+    let winebridge = find_component(core.components(), &args.winebridge)?;
     let umu = args
         .umu
         .as_deref()
-        .map(|id| find_component(&components, id))
+        .map(|id| find_component(core.components(), id))
         .transpose()?;
-    let bottle = manager
-        .create(
-            args.name,
-            args.storage.bottle_type(),
-            runner,
-            winebridge,
-            umu,
-        )
-        .await?;
-    print_bottle(&bottle);
+    let selection = runner_selection(runner, umu)?;
+    let bottle = run_operation(core.bottles().create(
+        args.name,
+        args.storage.bottle_type(),
+        selection,
+        winebridge,
+    ))
+    .await?;
+    print_bottle(&bottle)?;
     Ok(())
 }
 
-async fn manage_bottle(
-    manager: &BottleManager,
-    directories: &Directories,
-    args: ManageArgs,
-) -> Result<()> {
-    let mut bottle = find_bottle(manager, &args.bottle)?;
+async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
+    let bottle = find_bottle(core.bottles(), &args.bottle).await?;
     match args.command {
-        ManageCommand::Show => print_bottle(&bottle),
-        ManageCommand::Delete => manager.delete(bottle.id()).await?,
+        ManageCommand::Show => print_bottle(&bottle)?,
+        ManageCommand::Delete => {
+            run_operation(core.bottles().delete(bottle.state()?.id())).await?;
+        }
         ManageCommand::Stop => bottle.stop().await?,
         ManageCommand::Processes => {
             for process in bottle.processes().await? {
@@ -426,40 +413,45 @@ async fn manage_bottle(
         ManageCommand::Install { command } => {
             match command {
                 InstallCommand::Component { component, umu } => {
-                    let components = ComponentManager::load(directories)?;
-                    let component = find_component(&components, &component)?;
+                    let component = find_component(core.components(), &component)?;
                     let umu = umu
                         .as_deref()
-                        .map(|id| find_component(&components, id))
+                        .map(|id| find_component(core.components(), id))
                         .transpose()?;
                     if component.kind().is_runner() {
-                        bottle.install_runner(component, umu).await?;
+                        run_operation(bottle.set_runner(runner_selection(component, umu)?)).await?;
                     } else if umu.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--umu is only valid when installing a runner",
                         )
                         .into());
+                    } else if component.kind() == ComponentKind::Winebridge {
+                        run_operation(bottle.set_winebridge(component)).await?;
+                    } else if component.kind() == ComponentKind::Umu {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "UMU must be selected with a Proton runner",
+                        )
+                        .into());
                     } else {
-                        bottle.install_component(component).await?;
+                        run_operation(bottle.install_component(component)).await?;
                     }
                 }
                 InstallCommand::Dependency { dependency } => {
-                    let dependencies = DependencyManager::load(directories)?;
-                    bottle
-                        .install_dependency(find_dependency(&dependencies, &dependency)?)
-                        .await?;
+                    let dependency = find_dependency(core.dependencies(), &dependency)?;
+                    run_operation(bottle.install_dependency(dependency)).await?;
                 }
             }
-            print_bottle(&bottle);
+            print_bottle(&bottle)?;
         }
         ManageCommand::Uninstall { command } => {
             match command {
                 UninstallCommand::Component { component } => {
-                    bottle.uninstall_component(component.parse()?).await?;
+                    run_operation(bottle.uninstall_component(component.parse()?)).await?;
                 }
             }
-            print_bottle(&bottle);
+            print_bottle(&bottle)?;
         }
         ManageCommand::Program { command } => match command {
             ProgramCommand::Add(args) => {
@@ -468,7 +460,9 @@ async fn manage_bottle(
                 program.working_directory = args.working_directory;
                 program.new_console = args.new_console;
                 let id = program.id;
-                bottle.add_program(program).await?;
+                let mut edit = bottle.edit();
+                edit.add_program(program);
+                edit.commit().await?;
                 println!("{id}");
             }
             ProgramCommand::Launch { program } => {
@@ -482,21 +476,33 @@ async fn manage_bottle(
         },
         ManageCommand::Env { command } => match command {
             EnvCommand::List => {
-                let mut environment = bottle.environment().iter().collect::<Vec<_>>();
-                environment.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                let state = bottle.state()?;
+                let mut environment = state.environment().iter().collect::<Vec<_>>();
+                environment.sort_unstable_by_key(|(name, _)| *name);
                 for (key, value) in environment {
                     println!("{key}={value}");
                 }
             }
-            EnvCommand::Set { key, value } => bottle.set_env(key, value).await?,
-            EnvCommand::Unset { key } => bottle.unset_env(key).await?,
+            EnvCommand::Set { key, value } => {
+                let mut edit = bottle.edit();
+                edit.set_env(&key, &value);
+                edit.commit().await?;
+            }
+            EnvCommand::Unset { key } => {
+                let mut edit = bottle.edit();
+                edit.unset_env(&key);
+                edit.commit().await?;
+            }
         },
-        ManageCommand::DllOverrides { command } => {
-            manage_dll_overrides(&mut bottle, command).await?
-        }
+        ManageCommand::DllOverrides { command } => manage_dll_overrides(&bottle, command).await?,
         ManageCommand::Snapshot { command } => match command {
             SnapshotCommand::Create { message } => {
-                println!("{}", bottle.create_snapshot(message).await?.state_id);
+                println!(
+                    "{}",
+                    run_operation(bottle.create_snapshot(message))
+                        .await?
+                        .state_id
+                );
             }
             SnapshotCommand::List => {
                 for snapshot in bottle.snapshots().await? {
@@ -504,19 +510,19 @@ async fn manage_bottle(
                 }
             }
             SnapshotCommand::Restore { state } => {
-                println!("{}", bottle.rollback(&state).await?);
+                println!("{}", run_operation(bottle.rollback(&state)).await?);
             }
         },
-        ManageCommand::Wrappers { command } => manage_wrappers(&mut bottle, command).await?,
+        ManageCommand::Wrappers { command } => manage_wrappers(&bottle, command).await?,
     }
     Ok(())
 }
 
-async fn manage_dll_overrides(bottle: &mut Bottle, command: DllOverridesCommand) -> Result<()> {
+async fn manage_dll_overrides(bottle: &Bottle, command: DllOverridesCommand) -> Result<()> {
     match command {
         DllOverridesCommand::List => {
             let mut overrides = bottle.dll_overrides().await?;
-            overrides.sort_unstable_by(|left, right| left.dll().cmp(right.dll()));
+            overrides.sort_unstable_by(|left, right| left.dll.cmp(&right.dll));
             for dll_override in &overrides {
                 print_dll_override(dll_override);
             }
@@ -534,7 +540,7 @@ async fn manage_dll_overrides(bottle: &mut Bottle, command: DllOverridesCommand)
 fn print_dll_override(dll_override: &DllOverride) {
     println!(
         "{}\t{}",
-        dll_override.dll(),
+        dll_override.dll,
         dll_override_mode_name(dll_override.mode())
     );
 }
@@ -550,89 +556,92 @@ fn dll_override_mode_name(mode: DllOverrideMode) -> &'static str {
     }
 }
 
-async fn manage_wrappers(bottle: &mut Bottle, command: WrappersCommand) -> Result<()> {
+async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()> {
     match command {
         WrappersCommand::Gamescope { command } => {
             match command {
                 GamescopeCommand::Show => {}
                 GamescopeCommand::Enable => {
-                    let mut wrappers = bottle.wrappers().clone();
-                    wrappers.gamescope.enabled = true;
-                    bottle.set_wrappers(wrappers).await?;
+                    let mut config = bottle.state()?.wrappers().gamescope.clone();
+                    config.enabled = true;
+                    let mut edit = bottle.edit();
+                    edit.set_gamescope(config);
+                    edit.commit().await?;
                 }
                 GamescopeCommand::Disable => {
-                    let mut wrappers = bottle.wrappers().clone();
-                    wrappers.gamescope.enabled = false;
-                    bottle.set_wrappers(wrappers).await?;
+                    let mut config = bottle.state()?.wrappers().gamescope.clone();
+                    config.enabled = false;
+                    let mut edit = bottle.edit();
+                    edit.set_gamescope(config);
+                    edit.commit().await?;
                 }
                 GamescopeCommand::Configure(args) => {
-                    let mut wrappers = bottle.wrappers().clone();
-                    wrappers.gamescope = args.config(wrappers.gamescope.enabled);
-                    bottle.set_wrappers(wrappers).await?;
+                    let config = args.config(bottle.state()?.wrappers().gamescope.enabled);
+                    let mut edit = bottle.edit();
+                    edit.set_gamescope(config);
+                    edit.commit().await?;
                 }
             }
-            println!("{:#?}", bottle.wrappers().gamescope);
+            println!("{:#?}", bottle.state()?.wrappers().gamescope);
         }
         WrappersCommand::Mangohud { command } => {
             match command {
                 MangohudCommand::Show => {}
                 MangohudCommand::Enable => {
-                    let mut wrappers = bottle.wrappers().clone();
-                    wrappers.mangohud.enabled = true;
-                    bottle.set_wrappers(wrappers).await?;
+                    let mut config = bottle.state()?.wrappers().mangohud.clone();
+                    config.enabled = true;
+                    let mut edit = bottle.edit();
+                    edit.set_mangohud(config);
+                    edit.commit().await?;
                 }
                 MangohudCommand::Disable => {
-                    let mut wrappers = bottle.wrappers().clone();
-                    wrappers.mangohud.enabled = false;
-                    bottle.set_wrappers(wrappers).await?;
+                    let mut config = bottle.state()?.wrappers().mangohud.clone();
+                    config.enabled = false;
+                    let mut edit = bottle.edit();
+                    edit.set_mangohud(config);
+                    edit.commit().await?;
                 }
             }
-            println!("{:#?}", bottle.wrappers().mangohud);
+            println!("{:#?}", bottle.state()?.wrappers().mangohud);
         }
     }
     Ok(())
 }
 
-fn bottle_manager(directories: Directories, fvs2d: Option<PathBuf>) -> Result<BottleManager> {
-    let fvs2d = fvs2d.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--fvs2d is required for bottle commands",
-        )
-    })?;
-    Ok(BottleManager::new(Context::new(directories, fvs2d)?))
-}
-
-fn find_component<'a>(manager: &'a ComponentManager, id: &str) -> io::Result<&'a Component> {
+fn find_component<'a>(manager: &'a ComponentManager, id: &str) -> Result<&'a Component> {
     manager
-        .components()
-        .iter()
-        .find(|component| component.id().to_string() == id)
+        .component(id.parse()?)
         .ok_or_else(|| missing("component", id))
+        .map_err(Into::into)
 }
 
-fn find_dependency<'a>(manager: &'a DependencyManager, id: &str) -> io::Result<&'a Dependency> {
+fn find_dependency<'a>(manager: &'a DependencyManager, id: &str) -> Result<&'a Dependency> {
     manager
-        .dependencies()
-        .iter()
-        .find(|dependency| dependency.id().to_string() == id)
+        .dependency(id.parse()?)
         .ok_or_else(|| missing("dependency", id))
+        .map_err(Into::into)
 }
 
-fn find_program<'a>(bottle: &'a Bottle, id: &str) -> io::Result<&'a Program> {
+fn find_program(bottle: &Bottle, id: &str) -> Result<Program> {
     bottle
+        .state()?
         .programs()
         .iter()
         .find(|program| program.id.to_string() == id)
+        .cloned()
         .ok_or_else(|| missing("program", id))
+        .map_err(Into::into)
 }
 
-fn find_bottle(manager: &BottleManager, selector: &str) -> Result<Bottle> {
-    Ok(manager
-        .list()?
-        .into_iter()
-        .find(|bottle| bottle.id().to_string() == selector || bottle.name() == selector)
-        .ok_or_else(|| missing("bottle", selector))?)
+async fn find_bottle(manager: &BottleManager, selector: &str) -> Result<Bottle> {
+    for bottle in manager.list().await? {
+        let bottle = bottle?;
+        let state = bottle.state()?;
+        if state.id().to_string() == selector || state.name() == selector {
+            return Ok(bottle);
+        }
+    }
+    Err(missing("bottle", selector).into())
 }
 
 fn missing(kind: &str, value: &str) -> io::Error {
@@ -652,26 +661,27 @@ fn print_component(component: &Component) {
     );
 }
 
-fn print_bottle(bottle: &Bottle) {
-    println!("id: {}", bottle.id());
-    println!("name: {}", bottle.name());
-    println!("storage: {:?}", bottle.r#type());
-    print_bottle_component("runner", bottle.runner());
-    print_bottle_component("winebridge", bottle.components().winebridge());
-    if let Some(component) = bottle.components().umu() {
+fn print_bottle(bottle: &Bottle) -> Result<()> {
+    let state = bottle.state()?;
+    println!("id: {}", state.id());
+    println!("name: {}", state.name());
+    println!("storage: {:?}", state.kind());
+    print_bottle_component("runner", state.runner().runner());
+    print_bottle_component("winebridge", state.winebridge());
+    if let Some(component) = state.runner().umu() {
         print_bottle_component("umu", component);
     }
     for (name, component) in [
-        ("dxvk", bottle.components().dxvk()),
-        ("vkd3d", bottle.components().vkd3d()),
-        ("nvapi", bottle.components().nvapi()),
-        ("latency-flex", bottle.components().latency_flex()),
+        ("dxvk", state.dxvk()),
+        ("vkd3d", state.vkd3d()),
+        ("nvapi", state.nvapi()),
+        ("latency-flex", state.latency_flex()),
     ] {
         if let Some(component) = component {
             print_bottle_component(name, component);
         }
     }
-    for dependency in bottle.dependencies() {
+    for dependency in state.dependencies() {
         println!(
             "dependency: {} {} {}",
             dependency.id(),
@@ -679,12 +689,13 @@ fn print_bottle(bottle: &Bottle) {
             dependency.version()
         );
     }
-    for program in bottle.programs() {
+    for program in state.programs() {
         println!(
             "program: {} {} {}",
             program.id, program.name, program.executable
         );
     }
+    Ok(())
 }
 
 fn print_bottle_component(name: &str, component: &Component) {
@@ -694,6 +705,55 @@ fn print_bottle_component(name: &str, component: &Component) {
         component.version(),
         component.path().display()
     );
+}
+
+fn runner_selection(runner: &Component, umu: Option<&Component>) -> Result<RunnerSelection> {
+    match runner.kind().runner_kind() {
+        Some(RunnerKind::Wine) if umu.is_none() => Ok(RunnerSelection::wine(runner.clone())?),
+        Some(RunnerKind::Wine) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--umu is only valid with a Proton runner",
+        )
+        .into()),
+        Some(RunnerKind::Proton) => Ok(RunnerSelection::proton(
+            runner.clone(),
+            umu.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a Proton runner requires --umu",
+                )
+            })?
+            .clone(),
+        )?),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the selected component is not a runner",
+        )
+        .into()),
+    }
+}
+
+async fn run_operation<T, P>(mut operation: Operation<T, P>) -> Result<T>
+where
+    P: Clone + Debug + Send + Sync + 'static,
+{
+    let mut progress = Box::pin(operation.progress());
+    let reporter = tokio::spawn(async move {
+        while let Some(progress) = progress.next().await {
+            eprintln!("progress: {progress:?}");
+        }
+    });
+
+    let result = tokio::select! {
+        result = &mut operation => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            eprintln!("cancelling...");
+            operation.cancel().await
+        }
+    };
+    reporter.await?;
+    Ok(result?)
 }
 
 #[cfg(test)]

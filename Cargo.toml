@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 bottles-core.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
+futures-util.workspace = true
 tokio.workspace = true
