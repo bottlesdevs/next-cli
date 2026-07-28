@@ -13,8 +13,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[derive(Parser)]
 #[command(version, about = "Bottles Next CLI")]
 struct Cli {
-    #[arg(long, global = true, value_name = "PATH", default_value = "fvs2d")]
-    fvs2d: PathBuf,
+    #[arg(long, global = true, value_name = "PATH")]
+    fvs2d: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -337,7 +337,10 @@ impl Storage {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::for_project("bottles-next").await?;
-    let core = Core::open(paths, cli.fvs2d).await?;
+    let fvs2d = cli
+        .fvs2d
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--fvs2d is required"))?;
+    let core = Core::open(paths, fvs2d).await?;
 
     match cli.command {
         Command::Components => {
