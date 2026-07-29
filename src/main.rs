@@ -20,10 +20,10 @@ struct Cli {
     fvs2d: Option<PathBuf>,
 
     #[arg(long)]
-    component_catalog: Url,
+    component_catalog: Option<Url>,
 
     #[arg(long)]
-    dependency_catalog: Url,
+    dependency_catalog: Option<Url>,
 
     #[command(subcommand)]
     command: Command,
@@ -374,27 +374,32 @@ impl Storage {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let Cli {
+        fvs2d,
+        component_catalog,
+        dependency_catalog,
+        command,
+    } = Cli::parse();
     let paths = Paths::for_project("bottles-next").await?;
-    let fvs2d = cli
-        .fvs2d
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--fvs2d is required"))?;
     let (downloads, scheduler) = DownloadManager::new(
         Arc::new(ReqwestClient::new()?),
         DownloadManagerConfig::default(),
     );
     let downloads = Arc::new(downloads);
     let scheduler = tokio::spawn(scheduler);
-    let core = Core::open(
-        paths,
-        fvs2d,
-        cli.component_catalog,
-        cli.dependency_catalog,
-        downloads.clone(),
-    )
-    .await?;
+    let mut core = Core::builder(paths, downloads.clone());
+    if let Some(fvs2d) = fvs2d {
+        core = core.fvs2d(fvs2d);
+    }
+    if let Some(component_catalog) = component_catalog {
+        core = core.component_catalog(component_catalog);
+    }
+    if let Some(dependency_catalog) = dependency_catalog {
+        core = core.dependency_catalog(dependency_catalog);
+    }
+    let core = core.build().await?;
 
-    let result = match cli.command {
+    let result = match command {
         Command::Library { command } => manage_library(core.library(), command).await,
         Command::Bottle { command } => match command {
             BottleCommand::Create(args) => create_bottle(&core, args).await,
@@ -881,18 +886,7 @@ mod tests {
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
-        let mut args = args.into_iter().map(Into::into);
-        let executable = args.next().expect("test command has an executable");
-        Cli::try_parse_from(
-            std::iter::once(executable)
-                .chain([
-                    OsString::from("--component-catalog"),
-                    OsString::from("https://example.test/components.json"),
-                    OsString::from("--dependency-catalog"),
-                    OsString::from("https://example.test/dependencies.json"),
-                ])
-                .chain(args),
-        )
+        Cli::try_parse_from(args.into_iter().map(Into::into))
     }
 
     #[test]
@@ -938,6 +932,8 @@ mod tests {
         ])
         .unwrap();
 
+        assert!(cli.component_catalog.is_none());
+        assert!(cli.dependency_catalog.is_none());
         assert!(matches!(
             cli.command,
             Command::Library {
