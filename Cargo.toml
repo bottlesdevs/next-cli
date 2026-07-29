@@ -6,5 +6,8 @@ edition.workspace = true
 [dependencies]
 bottles-core.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
+download-manager.workspace = true
 futures-util.workspace = true
+http-client = { workspace = true, features = ["reqwest"] }
 tokio = { workspace = true, features = ["full"] }
+url.workspace = true

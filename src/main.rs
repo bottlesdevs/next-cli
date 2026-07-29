@@ -1,14 +1,17 @@
-use std::{error::Error, fmt::Debug, io, path::PathBuf};
+use std::{error::Error, fmt::Debug, io, path::PathBuf, sync::Arc};
 
 use bottles_core::{
-    Bottle, BottleManager, BottleType, Component, ComponentKind, ComponentManager, Core,
-    Dependency, DependencyManager, DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter,
-    GamescopeScaler, Operation, Paths, Program, RunnerKind, RunnerSelection,
+    Bottle, BottleManager, BottleType, Component, ComponentKind, Core, Dependency, DllOverride,
+    DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Library, Operation, Paths,
+    Program, RunnerKind, RunnerSelection,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use download_manager::manager::{DownloadManager, DownloadManagerConfig};
 use futures_util::StreamExt;
+use http_client::ReqwestClient;
+use url::Url;
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Parser)]
 #[command(version, about = "Bottles Next CLI")]
@@ -16,20 +19,56 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     fvs2d: Option<PathBuf>,
 
+    #[arg(long)]
+    component_catalog: Url,
+
+    #[arg(long)]
+    dependency_catalog: Url,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// List locally available components.
-    Components,
-    /// List locally available dependencies.
-    Dependencies,
+    /// Refresh, inspect, download, or delete Library content.
+    Library {
+        #[command(subcommand)]
+        command: LibraryCommand,
+    },
     /// Create, list, or manage bottles.
     Bottle {
         #[command(subcommand)]
         command: BottleCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LibraryCommand {
+    /// Refresh both remote catalogs.
+    Refresh,
+    /// Rescan locally installed content.
+    Scan,
+    Components {
+        #[command(subcommand)]
+        command: LibraryItemCommand,
+    },
+    Dependencies {
+        #[command(subcommand)]
+        command: LibraryItemCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LibraryItemCommand {
+    List,
+    Download {
+        #[arg(value_name = "UUID")]
+        id: String,
+    },
+    Delete {
+        #[arg(value_name = "UUID")]
+        id: String,
     },
 }
 
@@ -340,26 +379,25 @@ async fn main() -> Result<()> {
     let fvs2d = cli
         .fvs2d
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--fvs2d is required"))?;
-    let core = Core::open(paths, fvs2d).await?;
+    let (downloads, scheduler) = DownloadManager::new(
+        Arc::new(ReqwestClient::new()?),
+        DownloadManagerConfig::default(),
+    );
+    let downloads = Arc::new(downloads);
+    let scheduler = tokio::spawn(scheduler);
+    let core = Core::open(
+        paths,
+        fvs2d,
+        cli.component_catalog,
+        cli.dependency_catalog,
+        downloads.clone(),
+    )
+    .await?;
 
-    match cli.command {
-        Command::Components => {
-            for component in core.components().components() {
-                print_component(component);
-            }
-        }
-        Command::Dependencies => {
-            for dependency in core.dependencies().dependencies() {
-                println!(
-                    "{}\t{}\t{}",
-                    dependency.id(),
-                    dependency.name(),
-                    dependency.version()
-                );
-            }
-        }
+    let result = match cli.command {
+        Command::Library { command } => manage_library(core.library(), command).await,
         Command::Bottle { command } => match command {
-            BottleCommand::Create(args) => create_bottle(&core, args).await?,
+            BottleCommand::Create(args) => create_bottle(&core, args).await,
             BottleCommand::List => {
                 for bottle in core.bottles().list().await? {
                     let bottle = bottle?;
@@ -372,28 +410,91 @@ async fn main() -> Result<()> {
                         state.runner().runner().version()
                     );
                 }
+                Ok(())
             }
-            BottleCommand::Manage(args) => manage_bottle(&core, args).await?,
+            BottleCommand::Manage(args) => manage_bottle(&core, args).await,
+        },
+    };
+
+    drop(core);
+    drop(downloads);
+    scheduler.await?;
+    result
+}
+
+async fn manage_library(library: &Library, command: LibraryCommand) -> Result<()> {
+    match command {
+        LibraryCommand::Refresh => run_operation(library.refresh_catalogs()).await?,
+        LibraryCommand::Scan => library.refresh().await?,
+        LibraryCommand::Components { command } => match command {
+            LibraryItemCommand::List => {
+                for status in library.state().components() {
+                    if let Some(component) = status.downloaded() {
+                        print_component(component);
+                    } else {
+                        println!(
+                            "{}\t{:?}\t{}\tnot-downloaded",
+                            status.id(),
+                            status.kind(),
+                            status.version()
+                        );
+                    }
+                }
+            }
+            LibraryItemCommand::Download { id } => {
+                print_component(&run_operation(library.download_component(id.parse()?)).await?);
+            }
+            LibraryItemCommand::Delete { id } => {
+                library.delete_component(id.parse()?).await?;
+            }
+        },
+        LibraryCommand::Dependencies { command } => match command {
+            LibraryItemCommand::List => {
+                for status in library.state().dependencies() {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        status.id(),
+                        status.name(),
+                        status.version(),
+                        if status.downloaded().is_some() {
+                            "downloaded"
+                        } else {
+                            "not-downloaded"
+                        }
+                    );
+                }
+            }
+            LibraryItemCommand::Download { id } => {
+                let dependency = run_operation(library.download_dependency(id.parse()?)).await?;
+                println!(
+                    "{}\t{}\t{}",
+                    dependency.id(),
+                    dependency.name(),
+                    dependency.version()
+                );
+            }
+            LibraryItemCommand::Delete { id } => {
+                library.delete_dependency(id.parse()?).await?;
+            }
         },
     }
-
     Ok(())
 }
 
 async fn create_bottle(core: &Core, args: CreateArgs) -> Result<()> {
-    let runner = find_component(core.components(), &args.runner)?;
-    let winebridge = find_component(core.components(), &args.winebridge)?;
+    let runner = find_component(core.library(), &args.runner)?;
+    let winebridge = find_component(core.library(), &args.winebridge)?;
     let umu = args
         .umu
         .as_deref()
-        .map(|id| find_component(core.components(), id))
+        .map(|id| find_component(core.library(), id))
         .transpose()?;
-    let selection = runner_selection(runner, umu)?;
+    let selection = runner_selection(&runner, umu.as_ref())?;
     let bottle = run_operation(core.bottles().create(
         args.name,
         args.storage.bottle_type(),
         selection,
-        winebridge,
+        &winebridge,
     ))
     .await?;
     print_bottle(&bottle)?;
@@ -416,13 +517,16 @@ async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
         ManageCommand::Install { command } => {
             match command {
                 InstallCommand::Component { component, umu } => {
-                    let component = find_component(core.components(), &component)?;
+                    let component = find_component(core.library(), &component)?;
                     let umu = umu
                         .as_deref()
-                        .map(|id| find_component(core.components(), id))
+                        .map(|id| find_component(core.library(), id))
                         .transpose()?;
                     if component.kind().is_runner() {
-                        run_operation(bottle.set_runner(runner_selection(component, umu)?)).await?;
+                        run_operation(
+                            bottle.set_runner(runner_selection(&component, umu.as_ref())?),
+                        )
+                        .await?;
                     } else if umu.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -430,7 +534,7 @@ async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
                         )
                         .into());
                     } else if component.kind() == ComponentKind::Winebridge {
-                        run_operation(bottle.set_winebridge(component)).await?;
+                        run_operation(bottle.set_winebridge(&component)).await?;
                     } else if component.kind() == ComponentKind::Umu {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -438,12 +542,12 @@ async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
                         )
                         .into());
                     } else {
-                        run_operation(bottle.install_component(component)).await?;
+                        run_operation(bottle.install_component(&component)).await?;
                     }
                 }
                 InstallCommand::Dependency { dependency } => {
-                    let dependency = find_dependency(core.dependencies(), &dependency)?;
-                    run_operation(bottle.install_dependency(dependency)).await?;
+                    let dependency = find_dependency(core.library(), &dependency)?;
+                    run_operation(bottle.install_dependency(&dependency)).await?;
                 }
             }
             print_bottle(&bottle)?;
@@ -611,16 +715,22 @@ async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()
     Ok(())
 }
 
-fn find_component<'a>(manager: &'a ComponentManager, id: &str) -> Result<&'a Component> {
-    manager
+fn find_component(library: &Library, id: &str) -> Result<Component> {
+    library
+        .state()
         .component(id.parse()?)
+        .and_then(|status| status.downloaded())
+        .cloned()
         .ok_or_else(|| missing("component", id))
         .map_err(Into::into)
 }
 
-fn find_dependency<'a>(manager: &'a DependencyManager, id: &str) -> Result<&'a Dependency> {
-    manager
+fn find_dependency(library: &Library, id: &str) -> Result<Dependency> {
+    library
+        .state()
         .dependency(id.parse()?)
+        .and_then(|status| status.downloaded())
+        .cloned()
         .ok_or_else(|| missing("dependency", id))
         .map_err(Into::into)
 }
@@ -755,7 +865,8 @@ where
             operation.cancel().await
         }
     };
-    reporter.await?;
+    reporter.abort();
+    let _ = reporter.await;
     Ok(result?)
 }
 
