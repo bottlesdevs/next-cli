@@ -872,11 +872,32 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
+
+    fn parse<I, T>(args: I) -> std::result::Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        let mut args = args.into_iter().map(Into::into);
+        let executable = args.next().expect("test command has an executable");
+        Cli::try_parse_from(
+            std::iter::once(executable)
+                .chain([
+                    OsString::from("--component-catalog"),
+                    OsString::from("https://example.test/components.json"),
+                    OsString::from("--dependency-catalog"),
+                    OsString::from("https://example.test/dependencies.json"),
+                ])
+                .chain(args),
+        )
+    }
 
     #[test]
     fn parses_grouped_bottle_commands() {
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -907,8 +928,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_library_download_command() {
+        let cli = parse([
+            "bottles",
+            "library",
+            "components",
+            "download",
+            "component-id",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Library {
+                command: LibraryCommand::Components {
+                    command: LibraryItemCommand::Download { id }
+                }
+            } if id == "component-id"
+        ));
+    }
+
+    #[test]
     fn parses_program_kill_command() {
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -939,9 +981,7 @@ mod tests {
             ("component", "component-id"),
             ("dependency", "dependency-id"),
         ] {
-            let cli =
-                Cli::try_parse_from(["bottles", "bottle", "manage", "test", "install", kind, id])
-                    .unwrap();
+            let cli = parse(["bottles", "bottle", "manage", "test", "install", kind, id]).unwrap();
             let Command::Bottle {
                 command: BottleCommand::Manage(args),
             } = cli.command
@@ -951,7 +991,7 @@ mod tests {
             assert!(matches!(args.command, ManageCommand::Install { .. }));
         }
 
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -982,7 +1022,7 @@ mod tests {
 
     #[test]
     fn parses_component_uninstall_command() {
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -1008,8 +1048,7 @@ mod tests {
 
     #[test]
     fn parses_processes_command() {
-        let cli =
-            Cli::try_parse_from(["bottles", "bottle", "manage", "test", "processes"]).unwrap();
+        let cli = parse(["bottles", "bottle", "manage", "test", "processes"]).unwrap();
         let Command::Bottle {
             command: BottleCommand::Manage(args),
         } = cli.command
@@ -1021,7 +1060,7 @@ mod tests {
 
     #[test]
     fn parses_stop_command() {
-        let cli = Cli::try_parse_from(["bottles", "bottle", "manage", "test", "stop"]).unwrap();
+        let cli = parse(["bottles", "bottle", "manage", "test", "stop"]).unwrap();
         let Command::Bottle {
             command: BottleCommand::Manage(args),
         } = cli.command
@@ -1040,7 +1079,7 @@ mod tests {
         ] {
             let mut args = vec!["bottles", "bottle", "manage", "test"];
             args.extend_from_slice(command);
-            let cli = Cli::try_parse_from(args).unwrap();
+            let cli = parse(args).unwrap();
             let Command::Bottle {
                 command: BottleCommand::Manage(args),
             } = cli.command
@@ -1056,7 +1095,7 @@ mod tests {
         for command in [&["list"][..], &["unset", "WAYLAND_DISPLAY"][..]] {
             let mut args = vec!["bottles", "bottle", "manage", "test", "env"];
             args.extend_from_slice(command);
-            let cli = Cli::try_parse_from(args).unwrap();
+            let cli = parse(args).unwrap();
             let Command::Bottle {
                 command: BottleCommand::Manage(args),
             } = cli.command
@@ -1066,7 +1105,7 @@ mod tests {
             assert!(matches!(args.command, ManageCommand::Env { .. }));
         }
 
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -1096,7 +1135,7 @@ mod tests {
         for command in [&["list"][..], &["unset", "d3d11"][..]] {
             let mut args = vec!["bottles", "bottle", "manage", "test", "dll-overrides"];
             args.extend_from_slice(command);
-            let cli = Cli::try_parse_from(args).unwrap();
+            let cli = parse(args).unwrap();
             let Command::Bottle {
                 command: BottleCommand::Manage(args),
             } = cli.command
@@ -1113,7 +1152,7 @@ mod tests {
             ("builtin", DllOverrideMode::Builtin),
             ("disabled", DllOverrideMode::Disabled),
         ] {
-            let cli = Cli::try_parse_from([
+            let cli = parse([
                 "bottles",
                 "bottle",
                 "manage",
@@ -1151,7 +1190,7 @@ mod tests {
         ] {
             let mut args = vec!["bottles", "bottle", "manage", "test", "wrappers"];
             args.extend_from_slice(command);
-            let cli = Cli::try_parse_from(args).unwrap();
+            let cli = parse(args).unwrap();
             let Command::Bottle {
                 command: BottleCommand::Manage(args),
             } = cli.command
@@ -1161,7 +1200,7 @@ mod tests {
             assert!(matches!(args.command, ManageCommand::Wrappers { .. }));
         }
 
-        let cli = Cli::try_parse_from([
+        let cli = parse([
             "bottles",
             "bottle",
             "manage",
@@ -1212,7 +1251,7 @@ mod tests {
         assert!(args.fullscreen);
 
         assert!(
-            Cli::try_parse_from([
+            parse([
                 "bottles",
                 "bottle",
                 "manage",
