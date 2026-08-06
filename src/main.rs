@@ -1,14 +1,12 @@
-use std::{error::Error, fmt::Debug, io, path::PathBuf, sync::Arc};
+use std::{error::Error, fmt::Debug, io, path::PathBuf};
 
 use bottles_core::{
-    Bottle, BottleManager, BottleType, Component, ComponentKind, Core, Dependency, DllOverride,
-    DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Library, Operation, Paths,
-    Program, RunnerKind, RunnerSelection,
+    Bottle, BottleManager, BottleType, Bottles, Component, ComponentKind, Config, Dependency,
+    DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Library,
+    Operation, Program, RunnerKind, RunnerSelection,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use download_manager::manager::{DownloadManager, DownloadManagerConfig};
 use futures_util::StreamExt;
-use http_client::ReqwestClient;
 use url::Url;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -380,31 +378,20 @@ async fn main() -> Result<()> {
         dependency_catalog,
         command,
     } = Cli::parse();
-    let paths = Paths::for_project("bottles-next").await?;
-    let (downloads, scheduler) = DownloadManager::new(
-        Arc::new(ReqwestClient::new()?),
-        DownloadManagerConfig::default(),
-    );
-    let downloads = Arc::new(downloads);
-    let scheduler = tokio::spawn(scheduler);
-    let mut core = Core::builder(paths, downloads.clone());
-    if let Some(fvs2d) = fvs2d {
-        core = core.fvs2d(fvs2d);
-    }
-    if let Some(component_catalog) = component_catalog {
-        core = core.component_catalog(component_catalog);
-    }
-    if let Some(dependency_catalog) = dependency_catalog {
-        core = core.dependency_catalog(dependency_catalog);
-    }
-    let core = core.build().await?;
+    let bottles = Bottles::open(Config {
+        fvs2d,
+        component_catalog,
+        dependency_catalog,
+        ..Config::default()
+    })
+    .await?;
 
     let result = match command {
-        Command::Library { command } => manage_library(core.library(), command).await,
+        Command::Library { command } => manage_library(bottles.library(), command).await,
         Command::Bottle { command } => match command {
-            BottleCommand::Create(args) => create_bottle(&core, args).await,
+            BottleCommand::Create(args) => create_bottle(&bottles, args).await,
             BottleCommand::List => {
-                for bottle in core.bottles().list().await? {
+                for bottle in bottles.bottles().list().await? {
                     let bottle = bottle?;
                     let state = bottle.state()?;
                     println!(
@@ -417,13 +404,11 @@ async fn main() -> Result<()> {
                 }
                 Ok(())
             }
-            BottleCommand::Manage(args) => manage_bottle(&core, args).await,
+            BottleCommand::Manage(args) => manage_bottle(&bottles, args).await,
         },
     };
 
-    drop(core);
-    drop(downloads);
-    scheduler.await?;
+    bottles.close().await?;
     result
 }
 
@@ -486,16 +471,16 @@ async fn manage_library(library: &Library, command: LibraryCommand) -> Result<()
     Ok(())
 }
 
-async fn create_bottle(core: &Core, args: CreateArgs) -> Result<()> {
-    let runner = find_component(core.library(), &args.runner)?;
-    let winebridge = find_component(core.library(), &args.winebridge)?;
+async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
+    let runner = find_component(bottles.library(), &args.runner)?;
+    let winebridge = find_component(bottles.library(), &args.winebridge)?;
     let umu = args
         .umu
         .as_deref()
-        .map(|id| find_component(core.library(), id))
+        .map(|id| find_component(bottles.library(), id))
         .transpose()?;
     let selection = runner_selection(&runner, umu.as_ref())?;
-    let bottle = run_operation(core.bottles().create(
+    let bottle = run_operation(bottles.bottles().create(
         args.name,
         args.storage.bottle_type(),
         selection,
@@ -506,12 +491,12 @@ async fn create_bottle(core: &Core, args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
-    let bottle = find_bottle(core.bottles(), &args.bottle).await?;
+async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
+    let bottle = find_bottle(bottles.bottles(), &args.bottle).await?;
     match args.command {
         ManageCommand::Show => print_bottle(&bottle)?,
         ManageCommand::Delete => {
-            run_operation(core.bottles().delete(bottle.state()?.id())).await?;
+            run_operation(bottles.bottles().delete(bottle.state()?.id())).await?;
         }
         ManageCommand::Stop => bottle.stop().await?,
         ManageCommand::Processes => {
@@ -522,10 +507,10 @@ async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
         ManageCommand::Install { command } => {
             match command {
                 InstallCommand::Component { component, umu } => {
-                    let component = find_component(core.library(), &component)?;
+                    let component = find_component(bottles.library(), &component)?;
                     let umu = umu
                         .as_deref()
-                        .map(|id| find_component(core.library(), id))
+                        .map(|id| find_component(bottles.library(), id))
                         .transpose()?;
                     if component.kind().is_runner() {
                         run_operation(
@@ -551,7 +536,7 @@ async fn manage_bottle(core: &Core, args: ManageArgs) -> Result<()> {
                     }
                 }
                 InstallCommand::Dependency { dependency } => {
-                    let dependency = find_dependency(core.library(), &dependency)?;
+                    let dependency = find_dependency(bottles.library(), &dependency)?;
                     run_operation(bottle.install_dependency(&dependency)).await?;
                 }
             }
