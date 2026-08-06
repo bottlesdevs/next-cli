@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Debug, io, path::PathBuf};
+use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
     Addon, Availability, Bottle, BottleManager, BottleType, Bottles, Config, DllOverride,
@@ -744,10 +744,7 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     Ok(())
 }
 
-async fn run_operation<T, P>(mut operation: Operation<T, P>) -> Result<T>
-where
-    P: Clone + Debug + Send + Sync + 'static,
-{
+async fn run_operation<T>(mut operation: Operation<T>) -> Result<T> {
     let mut progress = Box::pin(operation.progress());
     let reporter = tokio::spawn(async move {
         while let Some(progress) = progress.next().await {
