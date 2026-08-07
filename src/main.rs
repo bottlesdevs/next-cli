@@ -1,9 +1,9 @@
 use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
-    Addon, AddonManager, Availability, Bottle, BottleManager, BottleType, Bottles, Config,
-    DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Operation,
-    Program, RunnerComponent,
+    Addon, Addons, Availability, Bottle, BottleManager, BottleType, Bottles, Config, DllOverride,
+    DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Operation, Program,
+    RunnerComponent,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -376,7 +376,7 @@ async fn main() -> Result<()> {
     .await?;
 
     let result = match command {
-        Command::Addons { command } => manage_addons(bottles.addon_manager(), command).await,
+        Command::Addons { command } => manage_addons(bottles.addons(), command).await,
         Command::Bottle { command } => match command {
             BottleCommand::Create(args) => create_bottle(&bottles, args).await,
             BottleCommand::List => {
@@ -401,7 +401,7 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn manage_addons(addons: &AddonManager, command: AddonsCommand) -> Result<()> {
+async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
     match command {
         AddonsCommand::Refresh => run_operation(addons.refresh()).await?,
         AddonsCommand::Runners { command } => match command {
@@ -439,7 +439,7 @@ async fn manage_addons(addons: &AddonManager, command: AddonsCommand) -> Result<
 }
 
 async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
-    let runner = find_runner(bottles.addon_manager(), &args.runner)?;
+    let runner = find_runner(bottles.addons(), &args.runner)?;
     let bottle = run_operation(bottles.bottles().create(
         args.name,
         args.storage.bottle_type(),
@@ -466,11 +466,11 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         ManageCommand::Install { command } => {
             match command {
                 InstallCommand::Runner { runner } => {
-                    let runner = find_runner(bottles.addon_manager(), &runner)?;
+                    let runner = find_runner(bottles.addons(), &runner)?;
                     run_operation(bottle.set_runner(&runner)).await?;
                 }
                 InstallCommand::Addon { addon } => {
-                    let addon = find_addon(bottles.addon_manager(), &addon)?;
+                    let addon = find_addon(bottles.addons(), &addon)?;
                     run_operation(bottle.install(&addon)).await?;
                 }
             }
@@ -642,7 +642,7 @@ async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()
     Ok(())
 }
 
-fn find_runner(addons: &AddonManager, id: &str) -> Result<RunnerComponent> {
+fn find_runner(addons: &Addons, id: &str) -> Result<RunnerComponent> {
     addons
         .runners()
         .into_iter()
@@ -653,7 +653,7 @@ fn find_runner(addons: &AddonManager, id: &str) -> Result<RunnerComponent> {
         .map_err(Into::into)
 }
 
-fn find_addon(addons: &AddonManager, id: &str) -> Result<Addon> {
+fn find_addon(addons: &Addons, id: &str) -> Result<Addon> {
     addons
         .addons()
         .into_iter()
