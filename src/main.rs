@@ -380,8 +380,7 @@ async fn main() -> Result<()> {
         Command::Bottle { command } => match command {
             BottleCommand::Create(args) => create_bottle(&bottles, args).await,
             BottleCommand::List => {
-                for bottle in bottles.bottles().list().await? {
-                    let bottle = bottle?;
+                for bottle in bottles.bottles().list() {
                     let state = bottle.state()?;
                     println!(
                         "{}\t{}\t{:?}\t{}",
@@ -451,7 +450,7 @@ async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
 }
 
 async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
-    let bottle = find_bottle(bottles.bottles(), &args.bottle).await?;
+    let bottle = find_bottle(bottles.bottles(), &args.bottle)?;
     match args.command {
         ManageCommand::Show => print_bottle(&bottle)?,
         ManageCommand::Delete => {
@@ -675,9 +674,8 @@ fn find_program(bottle: &Bottle, id: &str) -> Result<Program> {
         .map_err(Into::into)
 }
 
-async fn find_bottle(manager: &BottleManager, selector: &str) -> Result<Bottle> {
-    for bottle in manager.list().await? {
-        let bottle = bottle?;
+fn find_bottle(bottles: &BottleManager, selector: &str) -> Result<Bottle> {
+    for bottle in bottles.list() {
         let state = bottle.state()?;
         if state.id().to_string() == selector || state.name() == selector {
             return Ok(bottle);
