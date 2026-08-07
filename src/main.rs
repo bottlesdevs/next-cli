@@ -1,9 +1,9 @@
 use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
-    Addon, Addons, Availability, Bottle, BottleManager, BottleType, Bottles, Config, DllOverride,
+    Addon, Addons, Availability, Bottle, BottleManager, Bottles, Config, DllOverride,
     DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Operation, Program,
-    RunnerComponent,
+    RunnerComponent, Storage,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -338,24 +338,24 @@ struct AddProgramArgs {
 struct CreateArgs {
     name: String,
 
-    #[arg(long, value_enum, default_value_t = Storage::Standard)]
-    storage: Storage,
+    #[arg(long, value_enum, default_value_t = StorageArg::Standard)]
+    storage: StorageArg,
 
     #[arg(long, value_name = "UUID")]
     runner: String,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Storage {
+enum StorageArg {
     Standard,
     Virgo,
 }
 
-impl Storage {
-    fn bottle_type(self) -> BottleType {
-        match self {
-            Self::Standard => BottleType::Standard,
-            Self::Virgo => BottleType::Virgo,
+impl From<StorageArg> for Storage {
+    fn from(storage: StorageArg) -> Self {
+        match storage {
+            StorageArg::Standard => Self::Standard,
+            StorageArg::Virgo => Self::Virgo,
         }
     }
 }
@@ -386,7 +386,7 @@ async fn main() -> Result<()> {
                         "{}\t{}\t{:?}\t{}",
                         state.id(),
                         state.name(),
-                        state.kind(),
+                        state.storage(),
                         state.runner().version()
                     );
                 }
@@ -439,11 +439,11 @@ async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
 
 async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
     let runner = find_runner(bottles.addons(), &args.runner)?;
-    let bottle = run_operation(bottles.bottles().create(
-        args.name,
-        args.storage.bottle_type(),
-        &runner,
-    ))
+    let bottle = run_operation(
+        bottles
+            .bottles()
+            .create(args.name, args.storage.into(), &runner),
+    )
     .await?;
     print_bottle(&bottle)?;
     Ok(())
@@ -717,7 +717,7 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     let state = bottle.state()?;
     println!("id: {}", state.id());
     println!("name: {}", state.name());
-    println!("storage: {:?}", state.kind());
+    println!("storage: {:?}", state.storage());
     println!(
         "runner: {} {} {}",
         state.runner().id(),
