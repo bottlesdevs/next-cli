@@ -1,8 +1,8 @@
 use std::{error::Error, io, path::PathBuf};
 
 use bottles_core::{
-    Addon, Availability, Bottle, BottleManager, BottleType, Bottles, Config, DllOverride,
-    DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Library, Operation,
+    Addon, AddonManager, Availability, Bottle, BottleManager, BottleType, Bottles, Config,
+    DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Operation,
     Program, RunnerComponent,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -29,10 +29,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Refresh, inspect, download, or delete Library content.
-    Library {
+    /// Refresh, inspect, download, or delete addons and runners.
+    Addons {
         #[command(subcommand)]
-        command: LibraryCommand,
+        command: AddonsCommand,
     },
     /// Create, list, or manage bottles.
     Bottle {
@@ -42,21 +42,21 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum LibraryCommand {
+enum AddonsCommand {
     /// Refresh the remote catalog and local state.
     Refresh,
     Runners {
         #[command(subcommand)]
-        command: LibraryItemCommand,
+        command: AddonItemCommand,
     },
     Addons {
         #[command(subcommand)]
-        command: LibraryItemCommand,
+        command: AddonItemCommand,
     },
 }
 
 #[derive(Subcommand)]
-enum LibraryItemCommand {
+enum AddonItemCommand {
     List,
     Download {
         #[arg(value_name = "UUID")]
@@ -376,7 +376,7 @@ async fn main() -> Result<()> {
     .await?;
 
     let result = match command {
-        Command::Library { command } => manage_library(bottles.library(), command).await,
+        Command::Addons { command } => manage_addons(bottles.addon_manager(), command).await,
         Command::Bottle { command } => match command {
             BottleCommand::Create(args) => create_bottle(&bottles, args).await,
             BottleCommand::List => {
@@ -401,37 +401,37 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn manage_library(library: &Library, command: LibraryCommand) -> Result<()> {
+async fn manage_addons(addons: &AddonManager, command: AddonsCommand) -> Result<()> {
     match command {
-        LibraryCommand::Refresh => run_operation(library.refresh()).await?,
-        LibraryCommand::Runners { command } => match command {
-            LibraryItemCommand::List => {
-                for runner in library.runners() {
+        AddonsCommand::Refresh => run_operation(addons.refresh()).await?,
+        AddonsCommand::Runners { command } => match command {
+            AddonItemCommand::List => {
+                for runner in addons.runners() {
                     print_runner(&runner);
                 }
             }
-            LibraryItemCommand::Download { id } => {
+            AddonItemCommand::Download { id } => {
                 let id = id.parse()?;
-                run_operation(library.fetch(id)).await?;
-                print_runner(&find_runner(library, &id.to_string())?);
+                run_operation(addons.fetch(id)).await?;
+                print_runner(&find_runner(addons, &id.to_string())?);
             }
-            LibraryItemCommand::Delete { id } => {
-                library.remove(id.parse()?).await?;
+            AddonItemCommand::Delete { id } => {
+                addons.remove(id.parse()?).await?;
             }
         },
-        LibraryCommand::Addons { command } => match command {
-            LibraryItemCommand::List => {
-                for addon in library.addons() {
+        AddonsCommand::Addons { command } => match command {
+            AddonItemCommand::List => {
+                for addon in addons.addons() {
                     print_addon(&addon);
                 }
             }
-            LibraryItemCommand::Download { id } => {
+            AddonItemCommand::Download { id } => {
                 let id = id.parse()?;
-                run_operation(library.fetch(id)).await?;
-                print_addon(&find_addon(library, &id.to_string())?);
+                run_operation(addons.fetch(id)).await?;
+                print_addon(&find_addon(addons, &id.to_string())?);
             }
-            LibraryItemCommand::Delete { id } => {
-                library.remove(id.parse()?).await?;
+            AddonItemCommand::Delete { id } => {
+                addons.remove(id.parse()?).await?;
             }
         },
     }
@@ -439,7 +439,7 @@ async fn manage_library(library: &Library, command: LibraryCommand) -> Result<()
 }
 
 async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
-    let runner = find_runner(bottles.library(), &args.runner)?;
+    let runner = find_runner(bottles.addon_manager(), &args.runner)?;
     let bottle = run_operation(bottles.bottles().create(
         args.name,
         args.storage.bottle_type(),
@@ -466,11 +466,11 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         ManageCommand::Install { command } => {
             match command {
                 InstallCommand::Runner { runner } => {
-                    let runner = find_runner(bottles.library(), &runner)?;
+                    let runner = find_runner(bottles.addon_manager(), &runner)?;
                     run_operation(bottle.set_runner(&runner)).await?;
                 }
                 InstallCommand::Addon { addon } => {
-                    let addon = find_addon(bottles.library(), &addon)?;
+                    let addon = find_addon(bottles.addon_manager(), &addon)?;
                     run_operation(bottle.install(&addon)).await?;
                 }
             }
@@ -642,8 +642,8 @@ async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()
     Ok(())
 }
 
-fn find_runner(library: &Library, id: &str) -> Result<RunnerComponent> {
-    library
+fn find_runner(addons: &AddonManager, id: &str) -> Result<RunnerComponent> {
+    addons
         .runners()
         .into_iter()
         .find(|runner| {
@@ -653,8 +653,8 @@ fn find_runner(library: &Library, id: &str) -> Result<RunnerComponent> {
         .map_err(Into::into)
 }
 
-fn find_addon(library: &Library, id: &str) -> Result<Addon> {
-    library
+fn find_addon(addons: &AddonManager, id: &str) -> Result<Addon> {
+    addons
         .addons()
         .into_iter()
         .find(|addon| {
@@ -812,16 +812,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_library_download_command() {
-        let cli = parse(["bottles", "library", "runners", "download", "runner-id"]).unwrap();
+    fn parses_addons_download_command() {
+        let cli = parse(["bottles", "addons", "runners", "download", "runner-id"]).unwrap();
 
         assert!(cli.component_catalog.is_none());
         assert!(cli.dependency_catalog.is_none());
         assert!(matches!(
             cli.command,
-            Command::Library {
-                command: LibraryCommand::Runners {
-                    command: LibraryItemCommand::Download { id }
+            Command::Addons {
+                command: AddonsCommand::Runners {
+                    command: AddonItemCommand::Download { id }
                 }
             } if id == "runner-id"
         ));
