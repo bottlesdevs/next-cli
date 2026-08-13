@@ -342,7 +342,31 @@ impl From<StorageArg> for Storage {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // Report the error's own message rather than the derived `Debug`
+            // form, which reduces explanatory errors to their variant names.
+            eprintln!("Error: {error}");
+            // Wrapper variants usually embed their source's message, so only
+            // report causes that say something the line above did not.
+            let mut reported = error.to_string();
+            let mut source = error.source();
+            while let Some(cause) = source {
+                let message = cause.to_string();
+                if !reported.contains(&message) {
+                    eprintln!("  caused by: {message}");
+                    reported = message;
+                }
+                source = cause.source();
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let Cli {
         fvs2d,
         component_catalog,
