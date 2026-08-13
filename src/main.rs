@@ -39,21 +39,6 @@ enum Command {
         #[command(subcommand)]
         command: BottleCommand,
     },
-    /// Inspect or provision Rosetta 2, the host prerequisite for GPTK runners.
-    #[cfg(target_os = "macos")]
-    Gptk {
-        #[command(subcommand)]
-        command: GptkCommand,
-    },
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Subcommand)]
-enum GptkCommand {
-    /// Report Rosetta 2 status without changing anything.
-    Status,
-    /// Install Rosetta 2 when it is missing, confirming before it runs.
-    Setup,
 }
 
 #[derive(Subcommand)]
@@ -399,8 +384,6 @@ async fn run() -> Result<()> {
             }
             BottleCommand::Manage(args) => manage_bottle(&bottles, args).await,
         },
-        #[cfg(target_os = "macos")]
-        Command::Gptk { command } => manage_gptk(command).await,
     };
 
     bottles.close().await?;
@@ -467,60 +450,6 @@ async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-async fn manage_gptk(command: GptkCommand) -> Result<()> {
-    use bottles_core::gptk_setup;
-
-    match command {
-        GptkCommand::Status => print_gptk_status(&gptk_setup::status().await),
-        GptkCommand::Setup => run_gptk_setup().await?,
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn print_gptk_status(status: &bottles_core::gptk_setup::GptkStatus) {
-    println!("apple silicon: {}", status.apple_silicon);
-    println!("rosetta 2 installed: {}", status.rosetta_installed);
-    println!("ready to run gptk runners: {}", status.ready());
-}
-
-/// Installs Rosetta 2 when it is missing, confirming before the system-modifying
-/// command runs. GPTK itself is a runner component; see `addons runners`.
-#[cfg(target_os = "macos")]
-async fn run_gptk_setup() -> Result<()> {
-    use bottles_core::gptk_setup;
-
-    let status = gptk_setup::status().await;
-    if !status.apple_silicon {
-        println!("Intel Macs run GPTK natively; nothing to install.");
-        return Ok(());
-    }
-    if status.rosetta_installed {
-        println!("Rosetta 2 is already installed.");
-        return Ok(());
-    }
-
-    if !confirm("Install Rosetta 2? Runs `softwareupdate --install-rosetta`.")? {
-        println!("Rosetta 2 is required on Apple Silicon; stopping.");
-        return Ok(());
-    }
-    gptk_setup::install_rosetta().await?;
-    println!("Rosetta 2 installed. Download a GPTK runner with `addons runners`.");
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn confirm(prompt: &str) -> Result<bool> {
-    use std::io::Write;
-
-    print!("{prompt} [y/N] ");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
