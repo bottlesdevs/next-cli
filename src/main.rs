@@ -39,7 +39,7 @@ enum Command {
         #[command(subcommand)]
         command: BottleCommand,
     },
-    /// Inspect or provision Apple's Game Porting Toolkit and its prerequisites.
+    /// Inspect or provision Rosetta 2, the host prerequisite for GPTK runners.
     #[cfg(target_os = "macos")]
     Gptk {
         #[command(subcommand)]
@@ -50,9 +50,9 @@ enum Command {
 #[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum GptkCommand {
-    /// Report Rosetta 2, x86_64 Homebrew, and GPTK status without changing anything.
+    /// Report Rosetta 2 status without changing anything.
     Status,
-    /// Walk through installing every missing prerequisite, confirming each step.
+    /// Install Rosetta 2 when it is missing, confirming before it runs.
     Setup,
 }
 
@@ -460,47 +460,31 @@ async fn manage_gptk(command: GptkCommand) -> Result<()> {
 fn print_gptk_status(status: &bottles_core::gptk_setup::GptkStatus) {
     println!("apple silicon: {}", status.apple_silicon);
     println!("rosetta 2 installed: {}", status.rosetta_installed);
-    println!(
-        "x86_64 homebrew installed: {}",
-        status.x86_64_homebrew_installed
-    );
-    println!("gptk installed: {}", status.gptk_installed);
+    println!("ready to run gptk runners: {}", status.ready());
 }
 
-/// Walks through installing every missing GPTK prerequisite, confirming each
-/// step before it runs a system-modifying command.
+/// Installs Rosetta 2 when it is missing, confirming before the system-modifying
+/// command runs. GPTK itself is a runner component; see `addons runners`.
 #[cfg(target_os = "macos")]
 async fn run_gptk_setup() -> Result<()> {
     use bottles_core::gptk_setup;
 
     let status = gptk_setup::status().await;
-    if status.gptk_installed {
-        println!("GPTK is already installed.");
+    if !status.apple_silicon {
+        println!("Intel Macs run GPTK natively; nothing to install.");
+        return Ok(());
+    }
+    if status.rosetta_installed {
+        println!("Rosetta 2 is already installed.");
         return Ok(());
     }
 
-    if status.apple_silicon && !status.rosetta_installed {
-        if !confirm("Install Rosetta 2? Runs `softwareupdate --install-rosetta`.")? {
-            println!("Rosetta 2 is required on Apple Silicon; stopping.");
-            return Ok(());
-        }
-        gptk_setup::install_rosetta().await?;
+    if !confirm("Install Rosetta 2? Runs `softwareupdate --install-rosetta`.")? {
+        println!("Rosetta 2 is required on Apple Silicon; stopping.");
+        return Ok(());
     }
-
-    if !status.x86_64_homebrew_installed {
-        if !confirm(
-            "Install a dedicated x86_64 Homebrew under /usr/local? Downloads and runs Homebrew's official installer script over HTTPS.",
-        )? {
-            println!("x86_64 Homebrew is required; stopping.");
-            return Ok(());
-        }
-        gptk_setup::install_x86_64_homebrew().await?;
-    }
-
-    if confirm("Install GPTK via `brew install gcenx/wine/game-porting-toolkit`?")? {
-        let path = gptk_setup::install_gptk().await?;
-        println!("GPTK installed at {}", path.display());
-    }
+    gptk_setup::install_rosetta().await?;
+    println!("Rosetta 2 installed. Download a GPTK runner with `addons runners`.");
     Ok(())
 }
 
