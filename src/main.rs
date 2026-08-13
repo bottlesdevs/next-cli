@@ -1,9 +1,9 @@
-use std::{error::Error, io, path::PathBuf};
+use std::{collections::HashMap, error::Error, io, path::PathBuf, sync::Arc};
 
 use bottles_core::{
-    Addon, Addons, Availability, Bottle, BottleManager, Bottles, Config, DllOverride,
-    DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, Operation, Program,
-    RunnerComponent, Storage,
+    Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component, Config, Dependency,
+    DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, IndexEntry,
+    Operation, Program, Storage,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -45,18 +45,6 @@ enum Command {
 enum AddonsCommand {
     /// Refresh the remote catalog and local state.
     Refresh,
-    Runners {
-        #[command(subcommand)]
-        command: AddonItemCommand,
-    },
-    Addons {
-        #[command(subcommand)]
-        command: AddonItemCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum AddonItemCommand {
     List,
     Download {
         #[arg(value_name = "UUID")]
@@ -93,12 +81,10 @@ enum ManageCommand {
     Stop,
     Processes,
     Install {
-        #[command(subcommand)]
-        command: InstallCommand,
+        addon: String,
     },
     Uninstall {
-        #[command(subcommand)]
-        command: UninstallCommand,
+        component: String,
     },
     Program {
         #[command(subcommand)]
@@ -119,26 +105,6 @@ enum ManageCommand {
     Wrappers {
         #[command(subcommand)]
         command: WrappersCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum InstallCommand {
-    Runner {
-        #[arg(value_name = "UUID")]
-        runner: String,
-    },
-    Addon {
-        #[arg(value_name = "UUID")]
-        addon: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum UninstallCommand {
-    Addon {
-        #[arg(value_name = "UUID")]
-        addon: String,
     },
 }
 
@@ -403,47 +369,72 @@ async fn main() -> Result<()> {
 async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
     match command {
         AddonsCommand::Refresh => run_operation(addons.refresh()).await?,
-        AddonsCommand::Runners { command } => match command {
-            AddonItemCommand::List => {
-                for runner in addons.runners() {
-                    print_runner(&runner);
+        AddonsCommand::List => {
+            let mut components = addons
+                .components()
+                .into_iter()
+                .map(|component| (component.id(), component))
+                .collect::<HashMap<_, _>>();
+            for entry in addons.component_entries() {
+                if let Some(component) = components.remove(&entry.id()) {
+                    print_component(&component);
+                } else {
+                    print_component_entry(&entry);
                 }
             }
-            AddonItemCommand::Download { id } => {
-                let id = id.parse()?;
-                run_operation(addons.fetch(id)).await?;
-                print_runner(&find_runner(addons, &id.to_string())?);
+            for component in components.values() {
+                print_component(component);
             }
-            AddonItemCommand::Delete { id } => {
-                addons.remove(id.parse()?).await?;
-            }
-        },
-        AddonsCommand::Addons { command } => match command {
-            AddonItemCommand::List => {
-                for addon in addons.addons() {
-                    print_addon(&addon);
+
+            let mut dependencies = addons
+                .dependencies()
+                .into_iter()
+                .map(|dependency| (dependency.id(), dependency))
+                .collect::<HashMap<_, _>>();
+            for entry in addons.dependency_entries() {
+                if let Some(dependency) = dependencies.remove(&entry.id()) {
+                    print_dependency(&dependency);
+                } else {
+                    print_dependency_entry(&entry);
                 }
             }
-            AddonItemCommand::Download { id } => {
-                let id = id.parse()?;
-                run_operation(addons.fetch(id)).await?;
-                print_addon(&find_addon(addons, &id.to_string())?);
+            for dependency in dependencies.values() {
+                print_dependency(dependency);
             }
-            AddonItemCommand::Delete { id } => {
-                addons.remove(id.parse()?).await?;
+        }
+        AddonsCommand::Download { id } => {
+            let id = id.parse()?;
+            if addons.component_entry(id).is_some() {
+                let component = run_operation(addons.fetch_component(id)).await?;
+                print_component(&component);
+            } else if addons.dependency_entry(id).is_some() {
+                let dependency = run_operation(addons.fetch_dependency(id)).await?;
+                print_dependency(&dependency);
+            } else {
+                return Err(missing("catalog entry", &id.to_string()).into());
             }
-        },
+        }
+        AddonsCommand::Delete { id } => {
+            let id = id.parse()?;
+            if addons.component(id).is_some() {
+                addons.remove_component(id).await?;
+            } else if addons.dependency(id).is_some() {
+                addons.remove_dependency(id).await?;
+            } else {
+                return Err(missing("addon", &id.to_string()).into());
+            }
+        }
     }
     Ok(())
 }
 
 async fn create_bottle(bottles: &Bottles, args: CreateArgs) -> Result<()> {
-    let runner = find_runner(bottles.addons(), &args.runner)?;
-    let bottle = run_operation(
-        bottles
-            .bottles()
-            .create(args.name, args.storage.into(), &runner),
-    )
+    let runner = find_component(bottles.addons(), &args.runner)?;
+    let bottle = run_operation(bottles.bottles().create(
+        args.name,
+        args.storage.into(),
+        runner.id(),
+    ))
     .await?;
     print_bottle(&bottle)?;
     Ok(())
@@ -462,28 +453,26 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
                 println!("{}\t{}\t{}", process.pid, process.name, process.threads);
             }
         }
-        ManageCommand::Install { command } => {
-            match command {
-                InstallCommand::Runner { runner } => {
-                    let runner = find_runner(bottles.addons(), &runner)?;
-                    run_operation(bottle.set_runner(&runner)).await?;
-                }
-                InstallCommand::Addon { addon } => {
-                    let addon = find_addon(bottles.addons(), &addon)?;
-                    run_operation(bottle.install(&addon)).await?;
-                }
+        ManageCommand::Install { addon } => {
+            let id = addon.parse().map_err(|_| missing("addon", &addon))?;
+            if bottles.addons().component(id).is_some() {
+                run_operation(bottle.set_component(id)).await?;
+            } else if bottles.addons().dependency(id).is_some() {
+                run_operation(bottle.install(id)).await?;
+            } else {
+                return Err(missing("addon", &addon).into());
             }
             print_bottle(&bottle)?;
         }
-        ManageCommand::Uninstall { command } => {
-            match command {
-                UninstallCommand::Addon { addon } => {
-                    let id = addon
-                        .parse()
-                        .map_err(|_| missing("installed addon", &addon))?;
-                    run_operation(bottle.uninstall(id)).await?;
-                }
-            }
+        ManageCommand::Uninstall { component } => {
+            let slot = bottle
+                .state()?
+                .components()
+                .values()
+                .find(|installed| installed.id().to_string() == component)
+                .map(Addon::slot)
+                .ok_or_else(|| missing("installed component", &component))?;
+            run_operation(bottle.remove_component(slot)).await?;
             print_bottle(&bottle)?;
         }
         ManageCommand::Program { command } => match command {
@@ -641,25 +630,11 @@ async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()
     Ok(())
 }
 
-fn find_runner(addons: &Addons, id: &str) -> Result<RunnerComponent> {
+fn find_component(addons: &Addons, id: &str) -> Result<Arc<IndexEntry<Component>>> {
+    let parsed = id.parse().map_err(|_| missing("addon", id))?;
     addons
-        .runners()
-        .into_iter()
-        .find(|runner| {
-            runner.id().to_string() == id && runner.availability() == Availability::Downloaded
-        })
-        .ok_or_else(|| missing("runner", id))
-        .map_err(Into::into)
-}
-
-fn find_addon(addons: &Addons, id: &str) -> Result<Addon> {
-    addons
-        .addons()
-        .into_iter()
-        .find(|addon| {
-            addon.id().to_string() == id && addon.availability() == Availability::Downloaded
-        })
-        .ok_or_else(|| missing("addon", id))
+        .component(parsed)
+        .ok_or_else(|| missing("component", id))
         .map_err(Into::into)
 }
 
@@ -691,25 +666,51 @@ fn missing(kind: &str, value: &str) -> io::Error {
     )
 }
 
-fn print_runner(runner: &RunnerComponent) {
+fn print_component(addon: &IndexEntry<Component>) {
     println!(
-        "{}\t{}\t{}\t{:?}\t{:?}",
-        runner.id(),
-        runner.name(),
-        runner.version(),
-        runner.flavour(),
-        runner.availability(),
-    );
-}
-
-fn print_addon(addon: &Addon) {
-    println!(
-        "{}\t{}\t{}\t{:?}\t{:?}",
+        "{}\t{}\t{}\t{}\tdownloaded",
         addon.id(),
         addon.name(),
         addon.version(),
         addon.slot(),
-        addon.availability(),
+    );
+}
+
+fn print_dependency(addon: &IndexEntry<Dependency>) {
+    println!(
+        "{}\t{}\t{}\tdependency\tdownloaded",
+        addon.id(),
+        addon.name(),
+        addon.version(),
+    );
+}
+
+fn print_component_entry(entry: &CatalogEntry<Component>) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        entry.id(),
+        entry.name(),
+        entry.version(),
+        entry.slot(),
+        if entry.is_supported() {
+            "downloadable"
+        } else {
+            "unsupported"
+        },
+    );
+}
+
+fn print_dependency_entry(entry: &CatalogEntry<Dependency>) {
+    println!(
+        "{}\t{}\t{}\tdependency\t{}",
+        entry.id(),
+        entry.name(),
+        entry.version(),
+        if entry.is_supported() {
+            "downloadable"
+        } else {
+            "unsupported"
+        },
     );
 }
 
@@ -718,19 +719,21 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     println!("id: {}", state.id());
     println!("name: {}", state.name());
     println!("storage: {:?}", state.storage());
-    println!(
-        "runner: {} {} {}",
-        state.runner().id(),
-        state.runner().name(),
-        state.runner().version()
-    );
-    for addon in state.addons() {
+    for component in state.components().values() {
         println!(
-            "addon: {} {} {} {:?}",
-            addon.id(),
-            addon.name(),
-            addon.version(),
-            addon.slot()
+            "component: {} {} {} {}",
+            component.id(),
+            component.name(),
+            component.version(),
+            component.slot()
+        );
+    }
+    for dependency in state.dependencies() {
+        println!(
+            "dependency: {} {} {}",
+            dependency.id(),
+            dependency.name(),
+            dependency.version()
         );
     }
     for program in state.programs() {
@@ -811,17 +814,15 @@ mod tests {
 
     #[test]
     fn parses_addons_download_command() {
-        let cli = parse(["bottles", "addons", "runners", "download", "runner-id"]).unwrap();
+        let cli = parse(["bottles", "addons", "download", "addon-id"]).unwrap();
 
         assert!(cli.component_catalog.is_none());
         assert!(cli.dependency_catalog.is_none());
         assert!(matches!(
             cli.command,
             Command::Addons {
-                command: AddonsCommand::Runners {
-                    command: AddonItemCommand::Download { id }
-                }
-            } if id == "runner-id"
+                command: AddonsCommand::Download { id }
+            } if id == "addon-id"
         ));
     }
 
@@ -853,17 +854,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_runner_and_addon_install_commands() {
-        for (kind, id) in [("runner", "runner-id"), ("addon", "addon-id")] {
-            let cli = parse(["bottles", "bottle", "manage", "test", "install", kind, id]).unwrap();
-            let Command::Bottle {
-                command: BottleCommand::Manage(args),
-            } = cli.command
-            else {
-                panic!("expected bottle manage command");
-            };
-            assert!(matches!(args.command, ManageCommand::Install { .. }));
-        }
+    fn parses_addon_install_command() {
+        let cli = parse(["bottles", "bottle", "manage", "test", "install", "addon-id"]).unwrap();
+        let Command::Bottle {
+            command: BottleCommand::Manage(args),
+        } = cli.command
+        else {
+            panic!("expected bottle manage command");
+        };
+        assert!(matches!(
+            args.command,
+            ManageCommand::Install { addon } if addon == "addon-id"
+        ));
     }
 
     #[test]
@@ -874,7 +876,6 @@ mod tests {
             "manage",
             "test",
             "uninstall",
-            "addon",
             "addon-id",
         ])
         .unwrap();
@@ -886,9 +887,7 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            ManageCommand::Uninstall {
-                command: UninstallCommand::Addon { .. }
-            }
+            ManageCommand::Uninstall { component } if component == "addon-id"
         ));
     }
 
