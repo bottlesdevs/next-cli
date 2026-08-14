@@ -1,4 +1,6 @@
-use std::{collections::HashMap, error::Error, io, path::PathBuf, sync::Arc};
+#[cfg(feature = "fvs")]
+use std::path::PathBuf;
+use std::{collections::HashMap, error::Error, io, sync::Arc};
 
 use bottles_core::{
     Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component, Config, Dependency,
@@ -14,6 +16,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Parser)]
 #[command(version, about = "Bottles Next CLI")]
 struct Cli {
+    #[cfg(feature = "fvs")]
     #[arg(long, global = true, value_name = "PATH")]
     fvs2d: Option<PathBuf>,
 
@@ -98,6 +101,7 @@ enum ManageCommand {
         #[command(subcommand)]
         command: DllOverridesCommand,
     },
+    #[cfg(feature = "fvs")]
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -162,6 +166,7 @@ impl From<CliDllOverrideMode> for DllOverrideMode {
     }
 }
 
+#[cfg(feature = "fvs")]
 #[derive(Subcommand)]
 enum SnapshotCommand {
     Create {
@@ -314,6 +319,7 @@ struct CreateArgs {
 #[derive(Clone, Copy, ValueEnum)]
 enum StorageArg {
     Standard,
+    #[cfg(feature = "fvs")]
     Virgo,
 }
 
@@ -321,6 +327,7 @@ impl From<StorageArg> for Storage {
     fn from(storage: StorageArg) -> Self {
         match storage {
             StorageArg::Standard => Self::Standard,
+            #[cfg(feature = "fvs")]
             StorageArg::Virgo => Self::Virgo,
         }
     }
@@ -329,12 +336,14 @@ impl From<StorageArg> for Storage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let Cli {
+        #[cfg(feature = "fvs")]
         fvs2d,
         component_catalog,
         dependency_catalog,
         command,
     } = Cli::parse();
     let bottles = Bottles::open(Config {
+        #[cfg(feature = "fvs")]
         fvs2d,
         component_catalog,
         dependency_catalog,
@@ -517,6 +526,7 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
             }
         },
         ManageCommand::DllOverrides { command } => manage_dll_overrides(&bottle, command).await?,
+        #[cfg(feature = "fvs")]
         ManageCommand::Snapshot { command } => match command {
             SnapshotCommand::Create { message } => {
                 println!(
@@ -915,6 +925,7 @@ mod tests {
         assert!(matches!(args.command, ManageCommand::Stop));
     }
 
+    #[cfg(feature = "fvs")]
     #[test]
     fn parses_snapshot_commands() {
         for command in [
@@ -933,6 +944,13 @@ mod tests {
             };
             assert!(matches!(args.command, ManageCommand::Snapshot { .. }));
         }
+    }
+
+    #[cfg(not(feature = "fvs"))]
+    #[test]
+    fn rejects_fvs_commands() {
+        assert!(parse(["bottles", "--fvs2d", "fvs2d", "bottle", "list"]).is_err());
+        assert!(parse(["bottles", "bottle", "manage", "test", "snapshot", "list"]).is_err());
     }
 
     #[test]

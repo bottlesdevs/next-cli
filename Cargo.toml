@@ -3,6 +3,10 @@ name = "bottles-cli"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = ["fvs"]
+fvs = ["bottles-core/fvs"]
+
 [dependencies]
 bottles-core.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
