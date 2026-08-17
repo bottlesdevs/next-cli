@@ -1,11 +1,13 @@
-#[cfg(feature = "fvs")]
-use std::path::PathBuf;
-use std::{collections::HashMap, error::Error, io, sync::Arc};
+use std::{collections::HashMap, error::Error, io, path::PathBuf, str::FromStr, sync::Arc};
 
 use bottles_core::{
     Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component, Config, Dependency,
     DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, IndexEntry,
     Operation, Program, Storage,
+};
+use bottles_plugin_host::{
+    API_VERSION as PLUGIN_API_VERSION, PluginManager, PluginManagerConfig, PluginManifest,
+    build_source, validate_source, write_archive,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -42,6 +44,150 @@ enum Command {
         #[command(subcommand)]
         command: BottleCommand,
     },
+    /// Install, inspect, and invoke plugins.
+    Plugins {
+        #[command(subcommand)]
+        command: PluginsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginsCommand {
+    /// List installed plugins.
+    List,
+    /// Search a moderated plugin registry.
+    Search {
+        #[arg(long, value_name = "HTTPS_INDEX_URL")]
+        registry: Url,
+        #[arg(value_name = "QUERY", default_value = "")]
+        query: String,
+    },
+    /// Install a plugin from a moderated registry.
+    Install(RegistryPluginArgs),
+    /// Update an installed plugin from a moderated registry.
+    Update(RegistryPluginArgs),
+    /// Inspect or change one plugin's JSON settings.
+    Settings {
+        #[arg(value_name = "PLUGIN_ID")]
+        plugin: String,
+        #[command(subcommand)]
+        command: PluginSettingsCommand,
+    },
+    /// Manage named read-only directories exposed to plugins.
+    Roots {
+        #[command(subcommand)]
+        command: PluginRootsCommand,
+    },
+    /// List commands exported by enabled plugins.
+    Commands {
+        #[arg(value_name = "PLUGIN_ID")]
+        plugin: Option<String>,
+    },
+    /// Invoke a plugin command.
+    Run(PluginRunArgs),
+    /// Enable an installed plugin.
+    Enable(PluginIdArgs),
+    /// Disable an installed plugin.
+    Disable(PluginIdArgs),
+    /// Reload an enabled plugin from its installed files.
+    Reload(PluginIdArgs),
+    /// Recreate a failed plugin instance.
+    Retry(PluginIdArgs),
+    /// Uninstall a plugin.
+    Uninstall(PluginIdArgs),
+    /// Build and install a plugin from its source directory.
+    DevInstall(PluginSourceArgs),
+    /// Rebuild and reload a development plugin.
+    DevRebuild(PluginIdArgs),
+    /// Validate a plugin source directory.
+    Validate(PluginSourceArgs),
+    /// Build a distributable plugin archive from source.
+    Package {
+        #[arg(value_name = "SOURCE_DIRECTORY")]
+        source: PathBuf,
+        #[arg(short, long, value_name = "ARCHIVE")]
+        output: Option<PathBuf>,
+    },
+    /// Create a minimal Rust plugin project.
+    New {
+        #[arg(value_name = "DIRECTORY")]
+        directory: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct PluginIdArgs {
+    #[arg(value_name = "PLUGIN_ID")]
+    plugin: String,
+}
+
+#[derive(Args)]
+struct PluginSourceArgs {
+    #[arg(value_name = "SOURCE_DIRECTORY")]
+    source: PathBuf,
+}
+
+#[derive(Args)]
+struct RegistryPluginArgs {
+    #[arg(value_name = "PLUGIN_ID")]
+    plugin: String,
+    #[arg(long, value_name = "HTTPS_INDEX_URL")]
+    registry: Url,
+}
+
+#[derive(Subcommand)]
+enum PluginSettingsCommand {
+    List,
+    Set {
+        key: String,
+        #[arg(value_name = "JSON_VALUE")]
+        value: String,
+    },
+    Unset {
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginRootsCommand {
+    List,
+    Add { name: String, path: PathBuf },
+    Remove { name: String },
+}
+
+#[derive(Args)]
+struct PluginRunArgs {
+    #[arg(value_name = "PLUGIN_ID/COMMAND_ID")]
+    command: PluginCommand,
+
+    #[arg(long, value_name = "UUID_OR_NAME")]
+    bottle: Option<String>,
+
+    #[arg(last = true, allow_hyphen_values = true, value_name = "ARGUMENT")]
+    arguments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PluginCommand {
+    plugin: String,
+    command: String,
+}
+
+impl FromStr for PluginCommand {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (plugin, command) = value
+            .split_once('/')
+            .filter(|(plugin, command)| {
+                !plugin.is_empty() && !command.is_empty() && !command.contains('/')
+            })
+            .ok_or("expected PLUGIN_ID/COMMAND_ID")?;
+        Ok(Self {
+            plugin: plugin.into(),
+            command: command.into(),
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -342,6 +488,21 @@ async fn main() -> Result<()> {
         dependency_catalog,
         command,
     } = Cli::parse();
+
+    if matches!(
+        &command,
+        Command::Plugins {
+            command: PluginsCommand::Validate(_)
+                | PluginsCommand::Package { .. }
+                | PluginsCommand::New { .. }
+        }
+    ) {
+        let Command::Plugins { command } = command else {
+            unreachable!();
+        };
+        return manage_plugin_source(command).await;
+    }
+
     let bottles = Bottles::open(Config {
         #[cfg(feature = "fvs")]
         fvs2d,
@@ -349,6 +510,7 @@ async fn main() -> Result<()> {
         dependency_catalog,
     })
     .await?;
+    let plugins = PluginManager::open(PluginManagerConfig::new(bottles.bottles().clone())?).await?;
 
     let result = match command {
         Command::Addons { command } => manage_addons(bottles.addons(), command).await,
@@ -369,10 +531,252 @@ async fn main() -> Result<()> {
             }
             BottleCommand::Manage(args) => manage_bottle(&bottles, args).await,
         },
+        Command::Plugins { command } => manage_plugins(&bottles, &plugins, command).await,
     };
 
     bottles.close().await?;
     result
+}
+
+async fn manage_plugins(
+    bottles: &Bottles,
+    plugins: &PluginManager,
+    command: PluginsCommand,
+) -> Result<()> {
+    match command {
+        PluginsCommand::List => {
+            for plugin in plugins.list().await {
+                println!(
+                    "{}\t{}\t{}\t{:?}",
+                    plugin.manifest.id,
+                    plugin.manifest.name,
+                    plugin.manifest.version,
+                    plugin.status
+                );
+            }
+        }
+        PluginsCommand::Search { registry, query } => {
+            for (id, plugin) in plugins.search_registry(&registry, &query).await? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    id, plugin.name, plugin.version, plugin.description
+                );
+            }
+        }
+        PluginsCommand::Install(args) => {
+            let plugin = plugins
+                .install_registry(&args.registry, &args.plugin)
+                .await?;
+            println!("{}\t{}", plugin.manifest.id, plugin.manifest.version);
+        }
+        PluginsCommand::Update(args) => {
+            let plugin = plugins
+                .update_registry(&args.registry, &args.plugin)
+                .await?;
+            println!("{}\t{}", plugin.manifest.id, plugin.manifest.version);
+        }
+        PluginsCommand::Settings { plugin, command } => match command {
+            PluginSettingsCommand::List => {
+                for (key, value) in plugins.plugin_settings(&plugin).await? {
+                    println!("{key}\t{value}");
+                }
+            }
+            PluginSettingsCommand::Set { key, value } => {
+                plugins.set_plugin_setting(&plugin, key, value).await?;
+            }
+            PluginSettingsCommand::Unset { key } => {
+                plugins.unset_plugin_setting(&plugin, &key).await?;
+            }
+        },
+        PluginsCommand::Roots { command } => match command {
+            PluginRootsCommand::List => {
+                for (name, path) in plugins.read_roots().await {
+                    println!("{name}\t{}", path.display());
+                }
+            }
+            PluginRootsCommand::Add { name, path } => {
+                println!("{}", plugins.add_read_root(name, path).await?.display());
+            }
+            PluginRootsCommand::Remove { name } => {
+                plugins.remove_read_root(&name).await?;
+            }
+        },
+        PluginsCommand::Commands { plugin } => {
+            for command in plugins.commands().await {
+                if plugin
+                    .as_ref()
+                    .is_some_and(|plugin| plugin != &command.plugin_id)
+                {
+                    continue;
+                }
+                println!(
+                    "{}/{}\t{}\t{}",
+                    command.plugin_id,
+                    command.command_id,
+                    command.command.title,
+                    command.command.usage
+                );
+            }
+        }
+        PluginsCommand::Run(args) => {
+            let bottle = args
+                .bottle
+                .map(|bottle| find_bottle(bottles.bottles(), &bottle))
+                .transpose()?
+                .map(|bottle| bottle.state().map(|state| state.id()))
+                .transpose()?;
+            println!(
+                "{}",
+                plugins
+                    .invoke(
+                        &args.command.plugin,
+                        &args.command.command,
+                        args.arguments,
+                        bottle,
+                    )
+                    .await?
+            );
+        }
+        PluginsCommand::Enable(args) => {
+            plugins.enable(&args.plugin).await?;
+        }
+        PluginsCommand::Disable(args) => {
+            plugins.disable(&args.plugin).await?;
+        }
+        PluginsCommand::Reload(args) => {
+            plugins.reload(&args.plugin).await?;
+        }
+        PluginsCommand::Retry(args) => {
+            plugins.retry(&args.plugin).await?;
+        }
+        PluginsCommand::Uninstall(args) => {
+            plugins.uninstall(&args.plugin).await?;
+        }
+        PluginsCommand::DevInstall(args) => {
+            let plugin = plugins.dev_install(&args.source).await?;
+            println!("{}\t{}", plugin.manifest.id, plugin.manifest.version);
+        }
+        PluginsCommand::DevRebuild(args) => {
+            let plugin = plugins.dev_rebuild(&args.plugin).await?;
+            println!("{}\t{}", plugin.manifest.id, plugin.manifest.version);
+        }
+        PluginsCommand::Validate(_)
+        | PluginsCommand::Package { .. }
+        | PluginsCommand::New { .. } => unreachable!("source command dispatched with core"),
+    }
+    Ok(())
+}
+
+async fn manage_plugin_source(command: PluginsCommand) -> Result<()> {
+    match command {
+        PluginsCommand::Validate(args) => {
+            let manifest = validate_source(&args.source).await?;
+            println!("{}\t{}", manifest.id, manifest.version);
+        }
+        PluginsCommand::Package { source, output } => {
+            let package = build_source(&source).await?;
+            let output = output.unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "{}-{}.tar.gz",
+                    package.manifest.id, package.manifest.version
+                ))
+            });
+            write_archive(&package, &output).await?;
+            println!("{}", output.display());
+        }
+        PluginsCommand::New { directory } => create_plugin_project(&directory).await?,
+        _ => unreachable!("runtime plugin command dispatched without core"),
+    }
+    Ok(())
+}
+
+async fn create_plugin_project(directory: &std::path::Path) -> Result<()> {
+    if tokio::fs::try_exists(directory).await? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", directory.display()),
+        )
+        .into());
+    }
+    let id = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid plugin directory"))?;
+    let manifest = format!(
+        r#"schema_version = 1
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "A Bottles plugin"
+authors = ["Your Name"]
+license = "GPL-3.0"
+repository = "https://example.invalid/{id}"
+api_version = "{}"
+
+[commands.hello]
+title = "Hello"
+description = "Say hello"
+usage = "hello [name]"
+requires_bottle = false
+"#,
+        PLUGIN_API_VERSION
+    );
+    PluginManifest::parse(&manifest)?;
+    let cargo = format!(
+        r#"[package]
+name = "{}"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bottles-plugin-api = "{}"
+"#,
+        id.replace('.', "-"),
+        PLUGIN_API_VERSION
+    );
+    let source = r#"use bottles_plugin_api::{register_plugin, Bottle, Command, Plugin};
+
+struct ExamplePlugin;
+
+impl Plugin for ExamplePlugin {
+    fn new() -> Self {
+        Self
+    }
+
+    fn run_command(
+        &mut self,
+        _command: Command,
+        arguments: Vec<String>,
+        _bottle: Option<&Bottle>,
+    ) -> Result<String, String> {
+        let name = arguments.first().map(String::as_str).unwrap_or("world");
+        Ok(format!("Hello, {name}!"))
+    }
+}
+
+register_plugin!(ExamplePlugin);
+"#;
+
+    tokio::fs::create_dir_all(directory.join("src")).await?;
+    let result = async {
+        tokio::fs::write(directory.join("plugin.toml"), manifest).await?;
+        tokio::fs::write(directory.join("Cargo.toml"), cargo).await?;
+        tokio::fs::write(directory.join("src/lib.rs"), source).await?;
+        tokio::fs::write(directory.join("LICENSE"), include_str!("../LICENSE")).await?;
+        tokio::fs::write(directory.join("README.md"), format!("# {id}\n")).await?;
+        Result::<()>::Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+    result?;
+    println!("{}", directory.display());
+    Ok(())
 }
 
 async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
@@ -820,6 +1224,171 @@ mod tests {
         };
         assert_eq!(args.bottle, "test");
         assert_eq!(program.arguments, ["--windowed"]);
+    }
+
+    #[test]
+    fn parses_plugin_run_command() {
+        let cli = parse([
+            "bottles",
+            "plugins",
+            "run",
+            "example/hello",
+            "--bottle",
+            "test",
+            "--",
+            "--verbose",
+            "player one",
+        ])
+        .unwrap();
+
+        let Command::Plugins {
+            command: PluginsCommand::Run(args),
+        } = cli.command
+        else {
+            panic!("expected plugin run command");
+        };
+        assert_eq!(args.command.plugin, "example");
+        assert_eq!(args.command.command, "hello");
+        assert_eq!(args.bottle.as_deref(), Some("test"));
+        assert_eq!(args.arguments, ["--verbose", "player one"]);
+
+        assert!(parse(["bottles", "plugins", "run", "missing-slash"]).is_err());
+        assert!(parse(["bottles", "plugins", "run", "a/b/c"]).is_err());
+    }
+
+    #[test]
+    fn parses_plugin_management_commands() {
+        for action in [
+            "enable",
+            "disable",
+            "reload",
+            "retry",
+            "uninstall",
+            "dev-rebuild",
+        ] {
+            parse(["bottles", "plugins", action, "example"]).unwrap();
+        }
+
+        let cli = parse(["bottles", "plugins", "commands", "example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Plugins {
+                command: PluginsCommand::Commands { plugin: Some(plugin) }
+            } if plugin == "example"
+        ));
+    }
+
+    #[test]
+    fn parses_plugin_registry_commands() {
+        let registry = "https://plugins.example/index.json";
+        parse([
+            "bottles",
+            "plugins",
+            "search",
+            "wine",
+            "--registry",
+            registry,
+        ])
+        .unwrap();
+        parse([
+            "bottles",
+            "plugins",
+            "install",
+            "example",
+            "--registry",
+            registry,
+        ])
+        .unwrap();
+        parse([
+            "bottles",
+            "plugins",
+            "update",
+            "example",
+            "--registry",
+            registry,
+        ])
+        .unwrap();
+        assert!(
+            parse([
+                "bottles",
+                "plugins",
+                "install",
+                "example",
+                "--registry",
+                "not-a-url",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_plugin_configuration_commands() {
+        for args in [
+            vec!["bottles", "plugins", "settings", "example", "list"],
+            vec![
+                "bottles", "plugins", "settings", "example", "set", "enabled", "true",
+            ],
+            vec![
+                "bottles", "plugins", "settings", "example", "unset", "enabled",
+            ],
+            vec!["bottles", "plugins", "roots", "list"],
+            vec!["bottles", "plugins", "roots", "add", "games", "./games"],
+            vec!["bottles", "plugins", "roots", "remove", "games"],
+        ] {
+            parse(args).unwrap();
+        }
+    }
+
+    #[test]
+    fn parses_plugin_source_commands() {
+        for action in ["dev-install", "validate"] {
+            parse(["bottles", "plugins", action, "./example"]).unwrap();
+        }
+
+        let cli = parse([
+            "bottles",
+            "plugins",
+            "package",
+            "./example",
+            "--output",
+            "example.tar.gz",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Plugins {
+                command: PluginsCommand::Package { source, output }
+            } if source == PathBuf::from("./example")
+                && output == Some(PathBuf::from("example.tar.gz"))
+        ));
+
+        let cli = parse(["bottles", "plugins", "new", "./example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Plugins {
+                command: PluginsCommand::New { directory }
+            } if directory == PathBuf::from("./example")
+        ));
+    }
+
+    #[tokio::test]
+    async fn creates_source_only_plugin_project() {
+        let directory = std::env::temp_dir().join(format!(
+            "bottles-cli-plugin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        create_plugin_project(&directory).await.unwrap();
+        assert!(directory.join("plugin.toml").is_file());
+        assert!(directory.join("Cargo.toml").is_file());
+        assert!(directory.join("src/lib.rs").is_file());
+        assert!(!directory.join("plugin.wasm").exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -9,6 +9,7 @@ fvs = ["bottles-core/fvs"]
 
 [dependencies]
 bottles-core.workspace = true
+bottles-plugin-host.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
 futures-util.workspace = true
 tokio = { workspace = true, features = ["full"] }
