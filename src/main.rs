@@ -486,23 +486,25 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         }
         ManageCommand::Program { command } => match command {
             ProgramCommand::Add(args) => {
-                let mut program = Program::new(args.name, args.executable);
-                program.args = args.arguments;
-                program.working_directory = args.working_directory;
-                program.new_console = args.new_console;
-                let id = program.id;
+                let mut program = Program::new(args.name, args.executable)?
+                    .with_args(args.arguments)
+                    .with_new_console(args.new_console);
+                if let Some(working_directory) = args.working_directory {
+                    program = program.with_working_directory(working_directory)?;
+                }
+                let id = program.id();
                 let mut edit = bottle.edit();
                 edit.add_program(program);
                 edit.commit().await?;
                 println!("{id}");
             }
             ProgramCommand::Launch { program } => {
-                let id = find_program(&bottle, &program)?.id;
-                println!("{}", bottle.run(id).await?);
+                let id = find_program(&bottle, &program)?.id();
+                println!("{}", bottle.launch_program(id).await?);
             }
             ProgramCommand::Kill { program } => {
-                let id = find_program(&bottle, &program)?.id;
-                bottle.kill(id).await?;
+                let id = find_program(&bottle, &program)?.id();
+                bottle.kill_program(id).await?;
             }
         },
         ManageCommand::Env { command } => match command {
@@ -652,8 +654,7 @@ fn find_program(bottle: &Bottle, id: &str) -> Result<Program> {
     bottle
         .state()?
         .programs()
-        .iter()
-        .find(|program| program.id.to_string() == id)
+        .find(|program| program.id().to_string() == id)
         .cloned()
         .ok_or_else(|| missing("program", id))
         .map_err(Into::into)
@@ -749,7 +750,9 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     for program in state.programs() {
         println!(
             "program: {} {} {}",
-            program.id, program.name, program.executable
+            program.id(),
+            program.name(),
+            program.executable()
         );
     }
     Ok(())
