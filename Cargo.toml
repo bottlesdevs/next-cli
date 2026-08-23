@@ -16,8 +16,11 @@ default = ["fvs"]
 fvs = ["bottles-core/fvs"]
 
 [dependencies]
+async-trait.workspace = true
 bottles-core.workspace = true
 clap = { version = "4.5.23", features = ["derive"] }
 futures-util.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
+toml = "0.9.10"
 url.workspace = true

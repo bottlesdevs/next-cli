@@ -1,14 +1,21 @@
-#[cfg(feature = "fvs")]
-use std::path::PathBuf;
-use std::{collections::HashMap, error::Error, io, sync::Arc};
+use std::{
+    collections::HashMap,
+    error::Error,
+    io::{self, Write},
+    path::PathBuf,
+    sync::Arc,
+};
 
+use async_trait::async_trait;
 use bottles_core::{
-    Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component, Config, Dependency,
-    DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter, GamescopeScaler, IndexEntry,
-    Operation, Program, Storage,
+    AccountLinkInteraction, Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component,
+    Config, Dependency, DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter,
+    GamescopeScaler, IndexEntry, Library, Operation, PluginId, PluginInfo, Plugins, Profile,
+    Profiles, Program, SearchSource, Storage,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
+use tokio::io::AsyncBufReadExt;
 use url::Url;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -42,6 +49,72 @@ enum Command {
         #[command(subcommand)]
         command: BottleCommand,
     },
+    /// Search installed programs and games owned through linked storefronts.
+    Library {
+        #[command(subcommand)]
+        command: LibraryCommand,
+    },
+    /// Inspect and manage installed plugins.
+    Plugins {
+        #[command(subcommand)]
+        command: PluginsCommand,
+    },
+    /// Inspect profiles and manage their storefront accounts.
+    Profiles {
+        #[command(subcommand)]
+        command: ProfilesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LibraryCommand {
+    Search {
+        #[arg(value_name = "QUERY")]
+        query: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginsCommand {
+    List,
+    /// Builds and installs a plugin source checkout.
+    DevInstall {
+        #[arg(value_name = "DIRECTORY")]
+        source: PathBuf,
+    },
+    Reload {
+        #[arg(value_name = "PLUGIN")]
+        plugin: PluginId,
+    },
+    Uninstall {
+        #[arg(value_name = "PLUGIN")]
+        plugin: PluginId,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfilesCommand {
+    List,
+    /// Shows the selected profile, or a profile selected by UUID or name.
+    Show {
+        #[arg(value_name = "PROFILE")]
+        profile: Option<String>,
+    },
+    /// Lists available account providers.
+    Providers,
+    /// Links an account to the selected profile, or to `--profile`.
+    Link(AccountArgs),
+    /// Unlinks an account without requiring its provider to be loaded.
+    Unlink(AccountArgs),
+}
+
+#[derive(Args)]
+struct AccountArgs {
+    #[arg(value_name = "PROVIDER")]
+    provider: PluginId,
+    /// Profile UUID or name; defaults to the selected profile.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -345,11 +418,12 @@ async fn main() -> Result<()> {
     let bottles = Bottles::open(Config {
         #[cfg(feature = "fvs")]
         fvs2d,
+        #[cfg(not(feature = "fvs"))]
+        fvs2d: None,
         component_catalog,
         dependency_catalog,
     })
     .await?;
-
     let result = match command {
         Command::Addons { command } => manage_addons(bottles.addons(), command).await,
         Command::Bottle { command } => match command {
@@ -369,12 +443,172 @@ async fn main() -> Result<()> {
             }
             BottleCommand::Manage(args) => manage_bottle(&bottles, args).await,
         },
+        Command::Library { command } => manage_library(bottles.library(), command).await,
+        Command::Plugins { command } => manage_plugins(bottles.plugins(), command).await,
+        Command::Profiles { command } => manage_profiles(bottles.profiles(), command).await,
     };
 
     bottles.close().await?;
     result
 }
 
+async fn manage_library(library: &Library, command: LibraryCommand) -> Result<()> {
+    let LibraryCommand::Search { query } = command;
+    let mut entries = Box::pin(library.search(query));
+    while let Some(entry) = entries.next().await {
+        match entry.source() {
+            SearchSource::Installed(_) => {
+                println!("{}\t{}\tinstalled", entry.title(), entry.source_name());
+            }
+            SearchSource::Storefront {
+                profile_id,
+                provider_id,
+                game_id,
+            } => println!(
+                "{}\t{}\tstorefront\t{}\t{}\t{}",
+                entry.title(),
+                entry.source_name(),
+                provider_id,
+                profile_id,
+                game_id
+            ),
+            _ => unreachable!("unknown library search source"),
+        }
+    }
+    Ok(())
+}
+
+async fn manage_plugins(plugins: &Plugins, command: PluginsCommand) -> Result<()> {
+    match command {
+        PluginsCommand::List => {
+            for plugin in plugins.list() {
+                print_plugin(&plugin);
+            }
+        }
+        PluginsCommand::DevInstall { source } => {
+            print_plugin(&dev_install(plugins, &source).await?);
+        }
+        PluginsCommand::Reload { plugin } => plugins.reload(&plugin).await?,
+        PluginsCommand::Uninstall { plugin } => plugins.uninstall(&plugin).await?,
+    }
+    Ok(())
+}
+
+async fn dev_install(plugins: &Plugins, source: &std::path::Path) -> Result<PluginInfo> {
+    let cargo_manifest = tokio::fs::read_to_string(source.join("Cargo.toml")).await?;
+    let target = source_target_name(&cargo_manifest).map_err(std::io::Error::other)?;
+    let temporary = tempfile::tempdir()?;
+    let target_directory = temporary.path().join("target");
+    let output = tokio::process::Command::new("cargo")
+        .args(["build", "--release", "--target", "wasm32-wasip2"])
+        .arg("--manifest-path")
+        .arg(source.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target_directory)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(format!(
+            "plugin build failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let package = temporary.path().join("package");
+    tokio::fs::create_dir(&package).await?;
+    tokio::fs::copy(source.join("plugin.toml"), package.join("plugin.toml")).await?;
+    tokio::fs::copy(
+        target_directory
+            .join("wasm32-wasip2")
+            .join("release")
+            .join(target)
+            .with_extension("wasm"),
+        package.join("plugin.wasm"),
+    )
+    .await?;
+    Ok(plugins.install(&package).await?)
+}
+
+fn source_target_name(source: &str) -> std::result::Result<String, String> {
+    let cargo: toml::Value = toml::from_str(source).map_err(|error| error.to_string())?;
+    cargo
+        .get("lib")
+        .and_then(|lib| lib.get("name"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            cargo
+                .get("package")
+                .and_then(|package| package.get("name"))
+                .and_then(toml::Value::as_str)
+        })
+        .map(|name| name.replace('-', "_"))
+        .ok_or_else(|| "Cargo.toml has no package name".into())
+}
+
+async fn manage_profiles(profiles: &Profiles, command: ProfilesCommand) -> Result<()> {
+    match command {
+        ProfilesCommand::List => {
+            let selected = profiles.selected().id();
+            for profile in profiles.list() {
+                print_profile(&profile, profile.id() == selected);
+            }
+        }
+        ProfilesCommand::Show { profile } => {
+            let profile = find_profile(profiles, profile.as_deref())?;
+            print_profile(&profile, profile.id() == profiles.selected().id());
+        }
+        ProfilesCommand::Providers => {
+            for provider in profiles.account_providers() {
+                println!("{}\t{}", provider.id, provider.name);
+            }
+        }
+        ProfilesCommand::Link(args) => {
+            let profile = find_profile(profiles, args.profile.as_deref())?;
+            let profile = profiles
+                .link_account(
+                    profile.id(),
+                    args.provider,
+                    Arc::new(TerminalAccountLinkInteraction),
+                )
+                .await?;
+            print_profile(&profile, profile.id() == profiles.selected().id());
+        }
+        ProfilesCommand::Unlink(args) => {
+            let profile = find_profile(profiles, args.profile.as_deref())?;
+            let profile = profiles.unlink_account(profile.id(), args.provider).await?;
+            print_profile(&profile, profile.id() == profiles.selected().id());
+        }
+    }
+    Ok(())
+}
+
+struct TerminalAccountLinkInteraction;
+
+#[async_trait]
+impl AccountLinkInteraction for TerminalAccountLinkInteraction {
+    async fn request_input(
+        &self,
+        url: Url,
+        instructions: String,
+    ) -> std::result::Result<String, String> {
+        println!("{instructions}\n{url}");
+        print!("Authorization code: ");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+
+        let mut input = String::new();
+        let read = tokio::io::BufReader::new(tokio::io::stdin())
+            .read_line(&mut input)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("standard input closed".into());
+        }
+        Ok(input.trim().to_owned())
+    }
+}
 async fn manage_addons(addons: &Addons, command: AddonsCommand) -> Result<()> {
     match command {
         AddonsCommand::Refresh => run_operation(addons.refresh()).await?,
@@ -670,6 +904,16 @@ fn find_bottle(bottles: &BottleManager, selector: &str) -> Result<Bottle> {
     Err(missing("bottle", selector).into())
 }
 
+fn find_profile(profiles: &Profiles, selector: Option<&str>) -> Result<Profile> {
+    let Some(selector) = selector else {
+        return Ok(profiles.selected());
+    };
+    profiles
+        .list()
+        .into_iter()
+        .find(|profile| profile.id().to_string() == selector || profile.name() == selector)
+        .ok_or_else(|| missing("profile", selector).into())
+}
 fn missing(kind: &str, value: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
@@ -758,6 +1002,30 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     Ok(())
 }
 
+fn print_plugin(plugin: &PluginInfo) {
+    println!(
+        "{}\t{}\t{}",
+        plugin.manifest.id, plugin.manifest.name, plugin.manifest.version
+    );
+}
+
+fn print_profile(profile: &Profile, selected: bool) {
+    println!(
+        "{}\t{}{}",
+        profile.id(),
+        profile.name(),
+        if selected { "\tselected" } else { "" }
+    );
+    for account in profile.accounts() {
+        println!(
+            "account\t{}\t{}\t{}\t{}",
+            account.provider.id,
+            account.provider.name,
+            account.identity.account_id,
+            account.identity.display_name
+        );
+    }
+}
 async fn run_operation<T>(mut operation: Operation<T>) -> Result<T> {
     let mut progress = Box::pin(operation.progress());
     let reporter = tokio::spawn(async move {
@@ -791,6 +1059,82 @@ mod tests {
         T: Into<OsString>,
     {
         Cli::try_parse_from(args.into_iter().map(Into::into))
+    }
+
+    #[test]
+    fn parses_plugin_commands() {
+        let cli = parse([
+            "bottles",
+            "plugins",
+            "dev-install",
+            "plugins/random-storefront",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Plugins {
+                command: PluginsCommand::DevInstall { source }
+            } if source == PathBuf::from("plugins/random-storefront")
+        ));
+        assert!(matches!(
+            parse(["bottles", "plugins", "reload", "epic-games-store"]).unwrap().command,
+            Command::Plugins {
+                command: PluginsCommand::Reload { plugin }
+            } if plugin.as_str() == "epic-games-store"
+        ));
+        assert!(matches!(
+            parse(["bottles", "plugins", "uninstall", "epic-games-store"])
+                .unwrap()
+                .command,
+            Command::Plugins {
+                command: PluginsCommand::Uninstall { plugin }
+            } if plugin.as_str() == "epic-games-store"
+        ));
+    }
+
+    #[test]
+    fn parses_library_search() {
+        assert!(matches!(
+            parse(["bottles", "library", "search", "fortnite"])
+                .unwrap()
+                .command,
+            Command::Library {
+                command: LibraryCommand::Search { query }
+            } if query == "fortnite"
+        ));
+    }
+
+    #[test]
+    fn derives_the_wasm_artifact_name() {
+        assert_eq!(
+            source_target_name("[package]\nname = \"epic-games\"").unwrap(),
+            "epic_games"
+        );
+        assert_eq!(
+            source_target_name("[package]\nname = \"epic-games\"\n[lib]\nname = \"custom_guest\"")
+                .unwrap(),
+            "custom_guest"
+        );
+    }
+
+    #[test]
+    fn parses_profile_account_commands() {
+        let cli = parse([
+            "bottles",
+            "profiles",
+            "link",
+            "epic-games-store",
+            "--profile",
+            "Player",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profiles {
+                command: ProfilesCommand::Link(AccountArgs { provider, profile })
+            } if provider.to_string() == "epic-games-store"
+                && profile.as_deref() == Some("Player")
+        ));
     }
 
     #[test]
