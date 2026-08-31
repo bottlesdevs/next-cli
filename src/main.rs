@@ -418,8 +418,6 @@ async fn main() -> Result<()> {
     let bottles = Bottles::open(Config {
         #[cfg(feature = "fvs")]
         fvs2d,
-        #[cfg(not(feature = "fvs"))]
-        fvs2d: None,
         component_catalog,
         dependency_catalog,
     })
@@ -448,7 +446,7 @@ async fn main() -> Result<()> {
         Command::Profiles { command } => manage_profiles(bottles.profiles(), command).await,
     };
 
-    bottles.close().await?;
+    bottles.shutdown().await?;
     result
 }
 
@@ -551,8 +549,9 @@ fn source_target_name(source: &str) -> std::result::Result<String, String> {
 async fn manage_profiles(profiles: &Profiles, command: ProfilesCommand) -> Result<()> {
     match command {
         ProfilesCommand::List => {
-            let selected = profiles.selected().id();
-            for profile in profiles.list() {
+            let snapshot = profiles.snapshot();
+            let selected = snapshot.selected().id();
+            for profile in snapshot.profiles() {
                 print_profile(&profile, profile.id() == selected);
             }
         }
