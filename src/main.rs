@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use bottles_core::{
     AccountLinkInteraction, Addon, Addons, Bottle, BottleManager, Bottles, CatalogEntry, Component,
     Config, Dependency, DllOverride, DllOverrideMode, GamescopeConfig, GamescopeFilter,
-    GamescopeScaler, IndexEntry, Library, Operation, PluginId, PluginInfo, Plugins, Profile,
-    Profiles, Program, SearchSource, Storage,
+    GamescopeScaler, Release, Library, Operation, PluginId, PluginInfo, Plugins, PrefixBackend,
+    Profile, Profiles, ProgramSpec, SearchSource,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -396,7 +396,7 @@ enum StorageArg {
     Virgo,
 }
 
-impl From<StorageArg> for Storage {
+impl From<StorageArg> for PrefixBackend {
     fn from(storage: StorageArg) -> Self {
         match storage {
             StorageArg::Standard => Self::Standard,
@@ -433,8 +433,8 @@ async fn main() -> Result<()> {
                         "{}\t{}\t{:?}\t{}",
                         state.id(),
                         state.name(),
-                        state.storage(),
-                        state.runner().version()
+                        state.environment().backend,
+                        state.environment().runner().version()
                     );
                 }
                 Ok(())
@@ -709,7 +709,8 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         ManageCommand::Uninstall { component } => {
             let slot = bottle
                 .state()?
-                .components()
+                .environment()
+                .components
                 .values()
                 .find(|installed| installed.id().to_string() == component)
                 .map(Addon::slot)
@@ -719,21 +720,23 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         }
         ManageCommand::Program { command } => match command {
             ProgramCommand::Add(args) => {
-                let mut program = Program::new(args.name, args.executable)?
+                let mut program = ProgramSpec::new(args.name, args.executable)?
                     .with_args(args.arguments)
                     .with_new_console(args.new_console);
                 if let Some(working_directory) = args.working_directory {
                     program = program.with_working_directory(working_directory)?;
                 }
                 let id = program.id();
-                let mut edit = bottle.edit();
-                edit.add_program(program);
-                edit.commit().await?;
+                run_operation(bottle.edit(move |state| {
+                    state.programs.insert(program.id(), program);
+                    Ok(())
+                }))
+                .await?;
                 println!("{id}");
             }
             ProgramCommand::Launch { program } => {
                 let id = find_program(&bottle, &program)?.id();
-                println!("{}", bottle.launch_program(id).await?);
+                println!("{}", run_operation(bottle.launch_program(id)).await?);
             }
             ProgramCommand::Kill { program } => {
                 let id = find_program(&bottle, &program)?.id();
@@ -743,21 +746,25 @@ async fn manage_bottle(bottles: &Bottles, args: ManageArgs) -> Result<()> {
         ManageCommand::Env { command } => match command {
             EnvCommand::List => {
                 let state = bottle.state()?;
-                let mut environment = state.environment().iter().collect::<Vec<_>>();
-                environment.sort_unstable_by_key(|(name, _)| *name);
-                for (key, value) in environment {
+                let mut env_vars = state.environment().env_vars.iter().collect::<Vec<_>>();
+                env_vars.sort_unstable_by_key(|(name, _)| *name);
+                for (key, value) in env_vars {
                     println!("{key}={value}");
                 }
             }
             EnvCommand::Set { key, value } => {
-                let mut edit = bottle.edit();
-                edit.set_env(&key, &value);
-                edit.commit().await?;
+                run_operation(bottle.edit(move |state| {
+                    state.environment.env_vars.insert(key, value);
+                    Ok(())
+                }))
+                .await?;
             }
             EnvCommand::Unset { key } => {
-                let mut edit = bottle.edit();
-                edit.unset_env(&key);
-                edit.commit().await?;
+                run_operation(bottle.edit(move |state| {
+                    state.environment.env_vars.remove(&key);
+                    Ok(())
+                }))
+                .await?;
             }
         },
         ManageCommand::DllOverrides { command } => manage_dll_overrides(&bottle, command).await?,
@@ -829,53 +836,55 @@ async fn manage_wrappers(bottle: &Bottle, command: WrappersCommand) -> Result<()
             match command {
                 GamescopeCommand::Show => {}
                 GamescopeCommand::Enable => {
-                    let mut config = bottle.state()?.wrappers().gamescope.clone();
-                    config.enabled = true;
-                    let mut edit = bottle.edit();
-                    edit.set_gamescope(config);
-                    edit.commit().await?;
+                    run_operation(bottle.edit(|state| {
+                        state.environment.wrappers.gamescope.enabled = true;
+                        Ok(())
+                    }))
+                    .await?;
                 }
                 GamescopeCommand::Disable => {
-                    let mut config = bottle.state()?.wrappers().gamescope.clone();
-                    config.enabled = false;
-                    let mut edit = bottle.edit();
-                    edit.set_gamescope(config);
-                    edit.commit().await?;
+                    run_operation(bottle.edit(|state| {
+                        state.environment.wrappers.gamescope.enabled = false;
+                        Ok(())
+                    }))
+                    .await?;
                 }
                 GamescopeCommand::Configure(args) => {
-                    let config = args.config(bottle.state()?.wrappers().gamescope.enabled);
-                    let mut edit = bottle.edit();
-                    edit.set_gamescope(config);
-                    edit.commit().await?;
+                    run_operation(bottle.edit(move |state| {
+                        state.environment.wrappers.gamescope =
+                            args.config(state.environment.wrappers.gamescope.enabled);
+                        Ok(())
+                    }))
+                    .await?;
                 }
             }
-            println!("{:#?}", bottle.state()?.wrappers().gamescope);
+            println!("{:#?}", bottle.state()?.environment().wrappers.gamescope);
         }
         WrappersCommand::Mangohud { command } => {
             match command {
                 MangohudCommand::Show => {}
                 MangohudCommand::Enable => {
-                    let mut config = bottle.state()?.wrappers().mangohud.clone();
-                    config.enabled = true;
-                    let mut edit = bottle.edit();
-                    edit.set_mangohud(config);
-                    edit.commit().await?;
+                    run_operation(bottle.edit(|state| {
+                        state.environment.wrappers.mangohud.enabled = true;
+                        Ok(())
+                    }))
+                    .await?;
                 }
                 MangohudCommand::Disable => {
-                    let mut config = bottle.state()?.wrappers().mangohud.clone();
-                    config.enabled = false;
-                    let mut edit = bottle.edit();
-                    edit.set_mangohud(config);
-                    edit.commit().await?;
+                    run_operation(bottle.edit(|state| {
+                        state.environment.wrappers.mangohud.enabled = false;
+                        Ok(())
+                    }))
+                    .await?;
                 }
             }
-            println!("{:#?}", bottle.state()?.wrappers().mangohud);
+            println!("{:#?}", bottle.state()?.environment().wrappers.mangohud);
         }
     }
     Ok(())
 }
 
-fn find_component(addons: &Addons, id: &str) -> Result<Arc<IndexEntry<Component>>> {
+fn find_component(addons: &Addons, id: &str) -> Result<Arc<Release<Component>>> {
     let parsed = id.parse().map_err(|_| missing("addon", id))?;
     addons
         .component(parsed)
@@ -883,7 +892,7 @@ fn find_component(addons: &Addons, id: &str) -> Result<Arc<IndexEntry<Component>
         .map_err(Into::into)
 }
 
-fn find_program(bottle: &Bottle, id: &str) -> Result<Program> {
+fn find_program(bottle: &Bottle, id: &str) -> Result<ProgramSpec> {
     bottle
         .state()?
         .programs()
@@ -920,7 +929,7 @@ fn missing(kind: &str, value: &str) -> io::Error {
     )
 }
 
-fn print_component(addon: &IndexEntry<Component>) {
+fn print_component(addon: &Release<Component>) {
     println!(
         "{}\t{}\t{}\t{}\tdownloaded",
         addon.id(),
@@ -930,7 +939,7 @@ fn print_component(addon: &IndexEntry<Component>) {
     );
 }
 
-fn print_dependency(addon: &IndexEntry<Dependency>) {
+fn print_dependency(addon: &Release<Dependency>) {
     println!(
         "{}\t{}\t{}\tdependency\tdownloaded",
         addon.id(),
@@ -972,8 +981,8 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
     let state = bottle.state()?;
     println!("id: {}", state.id());
     println!("name: {}", state.name());
-    println!("storage: {:?}", state.storage());
-    for component in state.components().values() {
+    println!("storage: {:?}", state.environment().backend);
+    for component in state.environment().components.values() {
         println!(
             "component: {} {} {} {}",
             component.id(),
@@ -982,7 +991,7 @@ fn print_bottle(bottle: &Bottle) -> Result<()> {
             component.slot()
         );
     }
-    for dependency in state.dependencies() {
+    for dependency in &state.environment().dependencies {
         println!(
             "dependency: {} {} {}",
             dependency.id(),
