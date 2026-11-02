@@ -1,10 +1,10 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf};
 
 use bottles_core::{Addon, AddonKind, Addons, Slot};
 use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
-use crate::{Result, missing, run_operation};
+use crate::{Result, run_operation};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -45,63 +45,26 @@ pub async fn run(addons: &Addons, command: Command) -> Result<()> {
             run_operation(addons.refresh()).await?;
         }
         Command::List => list(addons),
-        Command::Download { id } => {
-            let state = addons.state();
-            let entry = state
-                .component_entry(id)
-                .or_else(|| state.dependency_entry(id))
-                .ok_or_else(|| missing("catalog entry", id))?;
-            match entry.kind() {
-                AddonKind::Runner => {
-                    print(&run_operation(addons.fetch_runner(id)).await?, "runner")
-                }
-                AddonKind::WineBridge => print(
-                    &run_operation(addons.fetch_winebridge(id)).await?,
-                    "winebridge",
-                ),
-                AddonKind::Umu => print(&run_operation(addons.fetch_umu(id)).await?, "umu"),
-                AddonKind::Component { slot } => print(
-                    &run_operation(addons.fetch_component(id)).await?,
-                    slot.as_str(),
-                ),
-                AddonKind::Dependency => print(
-                    &run_operation(addons.fetch_dependency(id)).await?,
-                    "dependency",
-                ),
-            }
-        }
+        Command::Download { id } => print(&run_operation(addons.fetch::<AddonKind>(id)).await?),
         Command::Import {
             source,
             kind,
             name,
             version,
-        } => match kind {
-            LocalKind::Runner => print(
-                &run_operation(addons.import_runner(source, name, version)).await?,
-                "runner",
-            ),
-            LocalKind::Winebridge => print(
-                &run_operation(addons.import_winebridge(source, name, version)).await?,
-                "winebridge",
-            ),
-            LocalKind::Umu => print(
-                &run_operation(addons.import_umu(source, name, version)).await?,
-                "umu",
-            ),
-            kind => {
-                let slot = match kind {
-                    LocalKind::Dxvk => Slot::Dxvk,
-                    LocalKind::Vkd3d => Slot::Vkd3d,
-                    LocalKind::Nvapi => Slot::Nvapi,
-                    LocalKind::LatencyFlex => Slot::LatencyFlex,
-                    _ => return Err("invalid component kind".into()),
-                };
-                print(
-                    &run_operation(addons.import_component(source, slot, name, version)).await?,
-                    slot.as_str(),
-                );
-            }
-        },
+        } => {
+            let kind = match kind {
+                LocalKind::Runner => AddonKind::Runner,
+                LocalKind::Winebridge => AddonKind::WineBridge,
+                LocalKind::Umu => AddonKind::Umu,
+                LocalKind::Dxvk => AddonKind::Component { slot: Slot::Dxvk },
+                LocalKind::Vkd3d => AddonKind::Component { slot: Slot::Vkd3d },
+                LocalKind::Nvapi => AddonKind::Component { slot: Slot::Nvapi },
+                LocalKind::LatencyFlex => AddonKind::Component {
+                    slot: Slot::LatencyFlex,
+                },
+            };
+            print(&run_operation(addons.import(source, name, version, Vec::new(), kind)).await?);
+        }
         Command::Delete { id } => addons.remove(id).await?,
     }
     Ok(())
@@ -109,27 +72,7 @@ pub async fn run(addons: &Addons, command: Command) -> Result<()> {
 
 fn list(addons: &Addons) {
     let state = addons.state();
-    let mut local = Vec::new();
-    local.extend(state.runners().iter().map(|item| row(item, "runner")));
-    local.extend(
-        state
-            .winebridges()
-            .iter()
-            .map(|item| row(item, "winebridge")),
-    );
-    local.extend(state.umus().iter().map(|item| row(item, "umu")));
-    local.extend(
-        state
-            .components()
-            .iter()
-            .map(|item| row(item, item.slot().as_str())),
-    );
-    local.extend(
-        state
-            .dependencies()
-            .iter()
-            .map(|item| row(item, "dependency")),
-    );
+    let mut local: Vec<_> = state.releases::<AddonKind>().iter().map(row).collect();
     local.sort_unstable_by_key(|(id, ..)| *id);
     let ids: HashSet<_> = local.iter().map(|(id, ..)| *id).collect();
     for (id, name, version, kind) in local {
@@ -143,13 +86,7 @@ fn list(addons: &Addons) {
         if ids.contains(&entry.id()) {
             continue;
         }
-        let kind = match entry.kind() {
-            AddonKind::Runner => "runner",
-            AddonKind::WineBridge => "winebridge",
-            AddonKind::Umu => "umu",
-            AddonKind::Component { slot } => slot.as_str(),
-            AddonKind::Dependency => "dependency",
-        };
+        let kind = label(entry.kind());
         let status = if entry.is_supported() {
             "downloadable"
         } else {
@@ -164,20 +101,31 @@ fn list(addons: &Addons) {
     }
 }
 
-fn row<K>(item: &Addon<K>, kind: &'static str) -> (Uuid, String, String, &'static str) {
+fn label(kind: AddonKind) -> &'static str {
+    match kind {
+        AddonKind::Runner => "runner",
+        AddonKind::WineBridge => "winebridge",
+        AddonKind::Umu => "umu",
+        AddonKind::Component { slot } => slot.as_str(),
+        AddonKind::Dependency => "dependency",
+    }
+}
+
+fn row(item: &Addon<AddonKind>) -> (Uuid, String, String, &'static str) {
     (
         item.id(),
         item.name().to_owned(),
         item.version().to_owned(),
-        kind,
+        label(item.kind()),
     )
 }
 
-fn print<K>(item: &Arc<Addon<K>>, kind: &str) {
+fn print(item: &Addon<AddonKind>) {
     println!(
-        "{}\t{}\t{}\t{kind}\tlocal",
+        "{}\t{}\t{}\t{}\tlocal",
         item.id(),
         item.name(),
-        item.version()
+        item.version(),
+        label(item.kind())
     );
 }

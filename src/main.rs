@@ -112,15 +112,11 @@ fn missing(kind: &str, value: impl std::fmt::Display) -> io::Error {
     )
 }
 
-fn local_addon<K: Clone>(
+fn local_addon<K: bottles_core::Kind>(
+    state: &bottles_core::AddonsState,
     id: Uuid,
-    releases: Vec<Arc<bottles_core::Addon<K>>>,
 ) -> Result<bottles_core::Addon<K>> {
-    releases
-        .into_iter()
-        .find(|item| item.id() == id)
-        .map(|item| item.as_ref().clone())
-        .ok_or_else(|| missing("addon", id).into())
+    state.release(id).ok_or_else(|| missing("addon", id).into())
 }
 
 async fn run_operation<T>(mut operation: Operation<T>) -> Result<T> {

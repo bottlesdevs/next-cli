@@ -1,9 +1,9 @@
 #[cfg(feature = "fvs")]
 use bottles_core::Program;
 use bottles_core::{
-    Addon, Bottle, Bottles, DllOverrideMode, EnvVars, EnvironmentConfig, GamescopeConfig,
-    GamescopeFilter, GamescopeScaler, Manager, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge,
-    Wrappers,
+    Addon, Bottle, Bottles, Component, Dependency, DllOverrideMode, EnvVars, EnvironmentConfig,
+    GamescopeConfig, GamescopeFilter, GamescopeScaler, Manager, PrefixBackend, ProgramSpec, Runner,
+    Umu, WineBridge, Wrappers,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use uuid::Uuid;
@@ -482,11 +482,9 @@ pub async fn run_program(bottles: &Bottles, command: ProgramCommand) -> Result<(
 fn runtime(bottles: &Bottles, args: RuntimeArgs) -> Result<RuntimeSelection> {
     let state = bottles.addons().state();
     Ok((
-        local_addon(args.runner, state.runners())?,
-        local_addon(args.winebridge, state.winebridges())?,
-        args.umu
-            .map(|id| local_addon(id, state.umus()))
-            .transpose()?,
+        local_addon(&state, args.runner)?,
+        local_addon(&state, args.winebridge)?,
+        args.umu.map(|id| local_addon(&state, id)).transpose()?,
     ))
 }
 
@@ -674,40 +672,31 @@ async fn manage_environment(
 
 async fn install(bottles: &Bottles, target: &Target, id: Uuid) -> Result<()> {
     let state = bottles.addons().state();
-    if let Some(item) = state.runners().into_iter().find(|item| item.id() == id) {
-        let runner = item.as_ref().clone();
+    if let Some(runner) = state.release::<Runner>(id) {
         run_operation(owner!(target, |owner| owner.edit(move |edit| {
             edit.set_runner(runner);
             Ok(())
         })))
         .await?;
-    } else if let Some(item) = state.winebridges().into_iter().find(|item| item.id() == id) {
-        let winebridge = item.as_ref().clone();
+    } else if let Some(winebridge) = state.release::<WineBridge>(id) {
         run_operation(owner!(target, |owner| owner.edit(move |edit| {
             edit.set_winebridge(winebridge);
             Ok(())
         })))
         .await?;
-    } else if let Some(item) = state.umus().into_iter().find(|item| item.id() == id) {
-        let umu = item.as_ref().clone();
+    } else if let Some(umu) = state.release::<Umu>(id) {
         run_operation(owner!(target, |owner| owner.edit(move |edit| {
             edit.set_umu(Some(umu));
             Ok(())
         })))
         .await?;
-    } else if let Some(item) = state.components().into_iter().find(|item| item.id() == id) {
-        let component = item.as_ref().clone();
+    } else if let Some(component) = state.release::<Component>(id) {
         run_operation(owner!(target, |owner| owner.edit(move |edit| {
             edit.set_component(component);
             Ok(())
         })))
         .await?;
-    } else if let Some(item) = state
-        .dependencies()
-        .into_iter()
-        .find(|item| item.id() == id)
-    {
-        let dependency = item.as_ref().clone();
+    } else if let Some(dependency) = state.release::<Dependency>(id) {
         run_operation(owner!(target, |owner| owner.edit(move |edit| {
             edit.add_dependency(dependency);
             Ok(())
