@@ -1,4 +1,4 @@
-//! Command-line access to Bottles Next environments, addons, and library entries.
+//! Command-line access to Bottles Next environments and addons.
 //!
 //! Run `bottles-cli --help` for the available commands. For example,
 //! `bottles-cli addons import ./runner.tar.xz --kind runner --name Local --version 1.0`
@@ -6,7 +6,6 @@
 
 mod addons;
 mod environments;
-mod library;
 mod plugins;
 mod profiles;
 
@@ -58,11 +57,6 @@ enum Command {
         #[command(subcommand)]
         command: environments::ProgramCommand,
     },
-    /// List, search, and launch registered applications.
-    Library {
-        #[command(subcommand)]
-        command: library::Command,
-    },
     /// Inspect installed plugins or build a local development plugin.
     Plugins {
         #[command(subcommand)]
@@ -95,7 +89,6 @@ async fn main() -> Result<()> {
         Command::Bottle { command } => environments::run_bottle(&bottles, command).await,
         #[cfg(feature = "fvs")]
         Command::Program { command } => environments::run_program(&bottles, command).await,
-        Command::Library { command } => library::run(bottles.library(), command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
         Command::Profiles { command } => profiles::run(bottles.profiles(), command).await,
     };
