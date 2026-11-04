@@ -45,16 +45,10 @@ enum Command {
         #[command(subcommand)]
         command: addons::Command,
     },
-    /// Create and manage persistent Wine bottles.
-    Bottle {
+    /// Create and manage persistent Wine environments.
+    Environment {
         #[command(subcommand)]
-        command: environments::BottleCommand,
-    },
-    /// Create and manage standalone Virgo programs.
-    #[cfg(feature = "fvs")]
-    Program {
-        #[command(subcommand)]
-        command: environments::ProgramCommand,
+        command: environments::Command,
     },
     /// Inspect installed plugins or build a local development plugin.
     Plugins {
@@ -80,9 +74,7 @@ async fn main() -> Result<()> {
     .await?;
     let result = match cli.command {
         Command::Addons { command } => addons::run(bottles.addons(), command).await,
-        Command::Bottle { command } => environments::run_bottle(&bottles, command).await,
-        #[cfg(feature = "fvs")]
-        Command::Program { command } => environments::run_program(&bottles, command).await,
+        Command::Environment { command } => environments::run(&bottles, command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
     };
     let shutdown = bottles.shutdown().await;
