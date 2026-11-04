@@ -7,7 +7,6 @@
 mod addons;
 mod environments;
 mod plugins;
-mod profiles;
 
 #[cfg(feature = "fvs")]
 use std::path::PathBuf;
@@ -62,11 +61,6 @@ enum Command {
         #[command(subcommand)]
         command: plugins::Command,
     },
-    /// Manage profiles and linked storefront accounts.
-    Profiles {
-        #[command(subcommand)]
-        command: profiles::Command,
-    },
 }
 
 #[tokio::main]
@@ -90,7 +84,6 @@ async fn main() -> Result<()> {
         #[cfg(feature = "fvs")]
         Command::Program { command } => environments::run_program(&bottles, command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
-        Command::Profiles { command } => profiles::run(bottles.profiles(), command).await,
     };
     let shutdown = bottles.shutdown().await;
     result?;
