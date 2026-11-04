@@ -1,12 +1,12 @@
-//! Command-line access to Bottles Next environments and addons.
+//! Command-line access to Bottles Next prefixes and addons.
 //!
 //! Run `bottles-cli --help` for the available commands. For example,
 //! `bottles-cli addons import ./runner.tar.xz --kind runner --name Local --version 1.0`
 //! acquires a trusted local runner archive without contacting a catalog.
 
 mod addons;
-mod environments;
 mod plugins;
+mod prefixes;
 
 #[cfg(feature = "fvs")]
 use std::path::PathBuf;
@@ -45,10 +45,10 @@ enum Command {
         #[command(subcommand)]
         command: addons::Command,
     },
-    /// Create and manage persistent Wine environments.
-    Environment {
+    /// Create and manage persistent Wine prefixes.
+    Prefix {
         #[command(subcommand)]
-        command: environments::Command,
+        command: prefixes::Command,
     },
     /// Inspect installed plugins or build a local development plugin.
     Plugins {
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     .await?;
     let result = match cli.command {
         Command::Addons { command } => addons::run(bottles.addons(), command).await,
-        Command::Environment { command } => environments::run(&bottles, command).await,
+        Command::Prefix { command } => prefixes::run(&bottles, command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
     };
     let shutdown = bottles.shutdown().await;

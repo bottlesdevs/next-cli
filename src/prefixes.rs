@@ -1,6 +1,6 @@
 use bottles_core::{
-    Addon, Bottles, Component, Dependency, DllOverrideMode, EnvVars, Environment, GamescopeConfig,
-    GamescopeFilter, GamescopeScaler, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge,
+    Addon, Bottles, Component, Dependency, DllOverrideMode, EnvVars, GamescopeConfig,
+    GamescopeFilter, GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge,
     Wrappers,
 };
 use clap::{Args, Subcommand, ValueEnum};
@@ -12,20 +12,20 @@ type RuntimeSelection = (Addon<Runner>, Addon<WineBridge>, Option<Addon<Umu>>);
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create an environment from acquired runtime releases.
-    Create(CreateEnvironment),
-    /// List saved environments.
+    /// Create a prefix from acquired runtime releases.
+    Create(CreatePrefix),
+    /// List saved prefixes.
     List,
-    /// Manage an environment by UUID.
+    /// Manage a prefix by UUID.
     Manage {
-        environment: Uuid,
+        prefix: Uuid,
         #[command(subcommand)]
-        command: EnvironmentCommand,
+        command: PrefixCommand,
     },
 }
 
 #[derive(Args)]
-pub struct CreateEnvironment {
+pub struct CreatePrefix {
     #[arg(long, value_enum, default_value_t = Storage::Standard)]
     storage: Storage,
     #[command(flatten)]
@@ -89,14 +89,14 @@ impl LaunchArgs {
 }
 
 #[derive(Subcommand)]
-pub enum EnvironmentCommand {
-    /// Show the saved environment state.
+pub enum PrefixCommand {
+    /// Show the saved prefix state.
     Show,
     /// Launch a Windows executable and print its process group and ID.
     Launch(LaunchArgs),
     /// Terminate a process group.
     Kill { group: Uuid },
-    /// Delete this environment and its managed data.
+    /// Delete this prefix and its managed data.
     Delete,
     /// Stop Wine and release mounted storage.
     Stop,
@@ -301,26 +301,23 @@ pub async fn run(bottles: &Bottles, command: Command) -> Result<()> {
     match command {
         Command::Create(args) => {
             let (runner, winebridge, umu) = runtime(bottles, args.runtime)?;
-            let environment = run_operation(bottles.environments().create(
+            let prefix = run_operation(bottles.prefixes().create(
                 args.storage.into(),
                 runner,
                 winebridge,
                 umu,
             ))
             .await?;
-            show(&environment)?;
+            show(&prefix)?;
         }
         Command::List => {
-            for (id, state) in bottles.environments().inventory().iter() {
+            for (id, state) in bottles.prefixes().inventory().iter() {
                 println!("{id}\t{:?}\t{}", state.backend, state.runner.version());
             }
         }
-        Command::Manage {
-            environment,
-            command,
-        } => {
-            let environment = bottles.environments().open(environment)?;
-            manage(bottles, &environment, command).await?
+        Command::Manage { prefix, command } => {
+            let prefix = bottles.prefixes().open(prefix)?;
+            manage(bottles, &prefix, command).await?
         }
     }
     Ok(())
@@ -335,11 +332,11 @@ fn runtime(bottles: &Bottles, args: RuntimeArgs) -> Result<RuntimeSelection> {
     ))
 }
 
-fn show(environment: &Environment) -> Result<()> {
-    let state = environment.state()?;
+fn show(prefix: &Prefix) -> Result<()> {
+    let state = prefix.state()?;
     println!(
         "id: {}\nstorage: {:?}\nrunner: {}\nwinebridge: {}",
-        environment.id(),
+        prefix.id(),
         state.backend,
         state.runner.id(),
         state.winebridge.id()
@@ -374,46 +371,42 @@ fn show(environment: &Environment) -> Result<()> {
     Ok(())
 }
 
-async fn manage(
-    bottles: &Bottles,
-    target: &Environment,
-    command: EnvironmentCommand,
-) -> Result<()> {
+async fn manage(bottles: &Bottles, target: &Prefix, command: PrefixCommand) -> Result<()> {
     match command {
-        EnvironmentCommand::Show => show(target)?,
-        EnvironmentCommand::Launch(args) => {
+        PrefixCommand::Show => show(target)?,
+        PrefixCommand::Launch(args) => {
             let group = args.group.unwrap_or_else(Uuid::new_v4);
             let pid = run_operation(target.launch(group, args.into_spec())).await?;
             println!("{group}\t{pid}");
         }
-        EnvironmentCommand::Kill { group } => target.kill(group).await?,
-        EnvironmentCommand::Delete => {
-            run_operation(bottles.environments().delete(target.id())).await?;
+        PrefixCommand::Kill { group } => target.kill(group).await?,
+        PrefixCommand::Delete => {
+            run_operation(bottles.prefixes().delete(target.id())).await?;
         }
-        EnvironmentCommand::Stop => target.stop().await?,
-        EnvironmentCommand::Processes => {
+        PrefixCommand::Stop => target.stop().await?,
+        PrefixCommand::Processes => {
             for process in target.processes().await? {
                 println!("{}\t{}\t{}", process.pid, process.name, process.threads);
             }
         }
-        EnvironmentCommand::Install { addon } => {
+        PrefixCommand::Install { addon } => {
             install(bottles, target, addon).await?;
             show(target)?;
         }
-        EnvironmentCommand::Uninstall { component } => {
+        PrefixCommand::Uninstall { component } => {
             uninstall(target, component).await?;
             show(target)?;
         }
-        EnvironmentCommand::Env { command } => manage_env(target, command).await?,
-        EnvironmentCommand::DllOverrides { command } => manage_dll(target, command).await?,
+        PrefixCommand::Env { command } => manage_env(target, command).await?,
+        PrefixCommand::DllOverrides { command } => manage_dll(target, command).await?,
         #[cfg(feature = "fvs")]
-        EnvironmentCommand::Snapshot { command } => manage_snapshot(target, command).await?,
-        EnvironmentCommand::Wrappers { command } => manage_wrappers(target, command).await?,
+        PrefixCommand::Snapshot { command } => manage_snapshot(target, command).await?,
+        PrefixCommand::Wrappers { command } => manage_wrappers(target, command).await?,
     }
     Ok(())
 }
 
-async fn install(bottles: &Bottles, target: &Environment, id: Uuid) -> Result<()> {
+async fn install(bottles: &Bottles, target: &Prefix, id: Uuid) -> Result<()> {
     let state = bottles.addons().state();
     if let Some(runner) = state.release::<Runner>(id) {
         run_operation(target.edit(move |edit| {
@@ -451,7 +444,7 @@ async fn install(bottles: &Bottles, target: &Environment, id: Uuid) -> Result<()
     Ok(())
 }
 
-async fn uninstall(target: &Environment, id: Uuid) -> Result<()> {
+async fn uninstall(target: &Prefix, id: Uuid) -> Result<()> {
     let settings = target.state()?;
     if settings.umu.as_ref().is_some_and(|item| item.id() == id) {
         run_operation(target.edit(|edit| {
@@ -471,7 +464,7 @@ async fn uninstall(target: &Environment, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-async fn manage_env(target: &Environment, command: EnvCommand) -> Result<()> {
+async fn manage_env(target: &Prefix, command: EnvCommand) -> Result<()> {
     match command {
         EnvCommand::List => {
             let settings = target.state()?;
@@ -498,7 +491,7 @@ async fn manage_env(target: &Environment, command: EnvCommand) -> Result<()> {
 }
 
 async fn edit_vars(
-    target: &Environment,
+    target: &Prefix,
     change: impl FnOnce(&mut EnvVars) + Send + 'static,
 ) -> Result<()> {
     run_operation(target.edit(move |edit| {
@@ -509,7 +502,7 @@ async fn edit_vars(
     Ok(())
 }
 
-async fn manage_dll(target: &Environment, command: DllCommand) -> Result<()> {
+async fn manage_dll(target: &Prefix, command: DllCommand) -> Result<()> {
     match command {
         DllCommand::List => {
             let mut overrides = run_operation(target.dll_overrides()).await?;
@@ -537,7 +530,7 @@ async fn manage_dll(target: &Environment, command: DllCommand) -> Result<()> {
 }
 
 #[cfg(feature = "fvs")]
-async fn manage_snapshot(target: &Environment, command: SnapshotCommand) -> Result<()> {
+async fn manage_snapshot(target: &Prefix, command: SnapshotCommand) -> Result<()> {
     match command {
         SnapshotCommand::Create { message } => {
             let snapshot = run_operation(target.create_snapshot(message)).await?;
@@ -555,7 +548,7 @@ async fn manage_snapshot(target: &Environment, command: SnapshotCommand) -> Resu
     Ok(())
 }
 
-async fn manage_wrappers(target: &Environment, command: WrapperCommand) -> Result<()> {
+async fn manage_wrappers(target: &Prefix, command: WrapperCommand) -> Result<()> {
     match command {
         WrapperCommand::Gamescope { command } => {
             match command {
@@ -589,7 +582,7 @@ async fn manage_wrappers(target: &Environment, command: WrapperCommand) -> Resul
 }
 
 async fn edit_wrappers(
-    target: &Environment,
+    target: &Prefix,
     change: impl FnOnce(&mut Wrappers) + Send + 'static,
 ) -> Result<()> {
     run_operation(target.edit(move |edit| {
