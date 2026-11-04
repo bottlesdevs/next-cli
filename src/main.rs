@@ -112,10 +112,10 @@ fn missing(kind: &str, value: impl std::fmt::Display) -> io::Error {
     )
 }
 
-fn local_addon<K: bottles_core::Kind>(
+fn local_addon<R: bottles_core::RoleMarker>(
     state: &bottles_core::AddonsState,
     id: Uuid,
-) -> Result<bottles_core::Addon<K>> {
+) -> Result<bottles_core::Addon<R>> {
     state.release(id).ok_or_else(|| missing("addon", id).into())
 }
 

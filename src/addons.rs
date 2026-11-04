@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf};
 
-use bottles_core::{Addon, AddonKind, Addons, Slot};
+use bottles_core::{Addon, AddonRole, Addons, Component, Runner, Slot, Umu, WineBridge};
 use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
@@ -45,25 +45,26 @@ pub async fn run(addons: &Addons, command: Command) -> Result<()> {
             run_operation(addons.refresh()).await?;
         }
         Command::List => list(addons),
-        Command::Download { id } => print(&run_operation(addons.fetch::<AddonKind>(id)).await?),
+        Command::Download { id } => print(&run_operation(addons.fetch::<AddonRole>(id)).await?),
         Command::Import {
             source,
             kind,
             name,
             version,
         } => {
-            let kind = match kind {
-                LocalKind::Runner => AddonKind::Runner,
-                LocalKind::Winebridge => AddonKind::WineBridge,
-                LocalKind::Umu => AddonKind::Umu,
-                LocalKind::Dxvk => AddonKind::Component { slot: Slot::Dxvk },
-                LocalKind::Vkd3d => AddonKind::Component { slot: Slot::Vkd3d },
-                LocalKind::Nvapi => AddonKind::Component { slot: Slot::Nvapi },
-                LocalKind::LatencyFlex => AddonKind::Component {
+            let role: AddonRole = match kind {
+                LocalKind::Runner => Runner {}.into(),
+                LocalKind::Winebridge => WineBridge {}.into(),
+                LocalKind::Umu => Umu {}.into(),
+                LocalKind::Dxvk => Component { slot: Slot::Dxvk }.into(),
+                LocalKind::Vkd3d => Component { slot: Slot::Vkd3d }.into(),
+                LocalKind::Nvapi => Component { slot: Slot::Nvapi }.into(),
+                LocalKind::LatencyFlex => Component {
                     slot: Slot::LatencyFlex,
-                },
+                }
+                .into(),
             };
-            print(&run_operation(addons.import(source, name, version, Vec::new(), kind)).await?);
+            print(&run_operation(addons.import(source, name, version, Vec::new(), role)).await?);
         }
         Command::Delete { id } => addons.remove(id).await?,
     }
@@ -72,7 +73,7 @@ pub async fn run(addons: &Addons, command: Command) -> Result<()> {
 
 fn list(addons: &Addons) {
     let state = addons.state();
-    let mut local: Vec<_> = state.releases::<AddonKind>().iter().map(row).collect();
+    let mut local: Vec<_> = state.releases::<AddonRole>().iter().map(row).collect();
     local.sort_unstable_by_key(|(id, ..)| *id);
     let ids: HashSet<_> = local.iter().map(|(id, ..)| *id).collect();
     for (id, name, version, kind) in local {
@@ -86,7 +87,7 @@ fn list(addons: &Addons) {
         if ids.contains(&entry.id()) {
             continue;
         }
-        let kind = label(entry.kind());
+        let kind = label(entry.role());
         let status = if entry.is_supported() {
             "downloadable"
         } else {
@@ -101,31 +102,31 @@ fn list(addons: &Addons) {
     }
 }
 
-fn label(kind: AddonKind) -> &'static str {
-    match kind {
-        AddonKind::Runner => "runner",
-        AddonKind::WineBridge => "winebridge",
-        AddonKind::Umu => "umu",
-        AddonKind::Component { slot } => slot.as_str(),
-        AddonKind::Dependency => "dependency",
+fn label(role: AddonRole) -> &'static str {
+    match role {
+        AddonRole::Runner(_) => "runner",
+        AddonRole::WineBridge(_) => "winebridge",
+        AddonRole::Umu(_) => "umu",
+        AddonRole::Component(component) => component.slot.as_str(),
+        AddonRole::Dependency(_) => "dependency",
     }
 }
 
-fn row(item: &Addon<AddonKind>) -> (Uuid, String, String, &'static str) {
+fn row(item: &Addon<AddonRole>) -> (Uuid, String, String, &'static str) {
     (
         item.id(),
         item.name().to_owned(),
         item.version().to_owned(),
-        label(item.kind()),
+        label(item.role()),
     )
 }
 
-fn print(item: &Addon<AddonKind>) {
+fn print(item: &Addon<AddonRole>) {
     println!(
         "{}\t{}\t{}\t{}\tlocal",
         item.id(),
         item.name(),
         item.version(),
-        label(item.kind())
+        label(item.role())
     );
 }
