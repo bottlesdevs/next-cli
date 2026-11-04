@@ -311,16 +311,8 @@ pub async fn run(bottles: &Bottles, command: Command) -> Result<()> {
             show(&environment)?;
         }
         Command::List => {
-            let mut environments = bottles.environments().list();
-            environments.sort_unstable_by_key(Environment::id);
-            for environment in environments {
-                let state = environment.state()?;
-                println!(
-                    "{}\t{:?}\t{}",
-                    environment.id(),
-                    state.backend,
-                    state.runner.version()
-                );
+            for (id, state) in bottles.environments().inventory().iter() {
+                println!("{id}\t{:?}\t{}", state.backend, state.runner.version());
             }
         }
         Command::Manage {
