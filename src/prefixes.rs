@@ -3,6 +3,7 @@ use bottles_core::{
     GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge, Wrappers,
 };
 use clap::{Args, Subcommand, ValueEnum};
+use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{Result, local_addon, missing, run_operation};
@@ -100,7 +101,13 @@ pub enum PrefixCommand {
     /// Stop Wine and release mounted storage.
     Stop,
     /// List processes reported by WineBridge.
-    Processes,
+    Processes {
+        /// Only list the processes in this process group.
+        #[arg(long)]
+        group: Option<Uuid>,
+    },
+    /// Print the running process groups after every change.
+    Watch,
     /// Select an acquired runtime, component, or dependency by UUID.
     Install { addon: Uuid },
     /// Clear an installed component or UMU selection by UUID.
@@ -380,9 +387,27 @@ async fn manage(core: &Core, target: &Prefix, command: PrefixCommand) -> Result<
             run_operation(core.prefixes().delete(target.id())).await?;
         }
         PrefixCommand::Stop => target.stop().await?,
-        PrefixCommand::Processes => {
-            for process in target.processes().await? {
-                println!("{}\t{}\t{}", process.pid, process.name, process.threads);
+        PrefixCommand::Processes { group } => {
+            for process in target.processes(group).await? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    process.pid,
+                    process.name,
+                    process.threads,
+                    process.group.unwrap_or_default()
+                );
+            }
+        }
+        PrefixCommand::Watch => {
+            let updates = target.watch_groups();
+            futures_util::pin_mut!(updates);
+            while let Some(groups) = updates.next().await {
+                match groups {
+                    None => println!("not running"),
+                    Some(groups) if groups.is_empty() => println!("no groups running"),
+                    Some(groups) => groups.iter().for_each(|group| println!("{group}")),
+                }
+                println!();
             }
         }
         PrefixCommand::Install { addon } => {
