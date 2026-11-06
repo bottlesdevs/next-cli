@@ -1,7 +1,6 @@
 use bottles_core::{
-    Addon, Bottles, Component, Dependency, DllOverrideMode, EnvVars, GamescopeConfig,
-    GamescopeFilter, GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge,
-    Wrappers,
+    Addon, Component, Core, Dependency, DllOverrideMode, EnvVars, GamescopeConfig, GamescopeFilter,
+    GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge, Wrappers,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use uuid::Uuid;
@@ -297,34 +296,33 @@ impl GamescopeArgs {
     }
 }
 
-pub async fn run(bottles: &Bottles, command: Command) -> Result<()> {
+pub async fn run(core: &Core, command: Command) -> Result<()> {
     match command {
         Command::Create(args) => {
-            let (runner, winebridge, umu) = runtime(bottles, args.runtime)?;
-            let prefix = run_operation(bottles.prefixes().create(
-                args.storage.into(),
-                runner,
-                winebridge,
-                umu,
-            ))
-            .await?;
+            let (runner, winebridge, umu) = runtime(core, args.runtime)?;
+            let prefix =
+                run_operation(
+                    core.prefixes()
+                        .create(args.storage.into(), runner, winebridge, umu),
+                )
+                .await?;
             show(&prefix)?;
         }
         Command::List => {
-            for (id, state) in bottles.prefixes().inventory().iter() {
+            for (id, state) in core.prefixes().inventory().iter() {
                 println!("{id}\t{:?}\t{}", state.backend, state.runner.version());
             }
         }
         Command::Manage { prefix, command } => {
-            let prefix = bottles.prefixes().open(prefix)?;
-            manage(bottles, &prefix, command).await?
+            let prefix = core.prefixes().open(prefix)?;
+            manage(core, &prefix, command).await?
         }
     }
     Ok(())
 }
 
-fn runtime(bottles: &Bottles, args: RuntimeArgs) -> Result<RuntimeSelection> {
-    let state = bottles.addons().state();
+fn runtime(core: &Core, args: RuntimeArgs) -> Result<RuntimeSelection> {
+    let state = core.addons().state();
     Ok((
         local_addon(&state, args.runner)?,
         local_addon(&state, args.winebridge)?,
@@ -369,7 +367,7 @@ fn show(prefix: &Prefix) -> Result<()> {
     Ok(())
 }
 
-async fn manage(bottles: &Bottles, target: &Prefix, command: PrefixCommand) -> Result<()> {
+async fn manage(core: &Core, target: &Prefix, command: PrefixCommand) -> Result<()> {
     match command {
         PrefixCommand::Show => show(target)?,
         PrefixCommand::Launch(args) => {
@@ -379,7 +377,7 @@ async fn manage(bottles: &Bottles, target: &Prefix, command: PrefixCommand) -> R
         }
         PrefixCommand::Kill { group } => target.kill(group).await?,
         PrefixCommand::Delete => {
-            run_operation(bottles.prefixes().delete(target.id())).await?;
+            run_operation(core.prefixes().delete(target.id())).await?;
         }
         PrefixCommand::Stop => target.stop().await?,
         PrefixCommand::Processes => {
@@ -388,7 +386,7 @@ async fn manage(bottles: &Bottles, target: &Prefix, command: PrefixCommand) -> R
             }
         }
         PrefixCommand::Install { addon } => {
-            install(bottles, target, addon).await?;
+            install(core, target, addon).await?;
             show(target)?;
         }
         PrefixCommand::Uninstall { component } => {
@@ -404,8 +402,8 @@ async fn manage(bottles: &Bottles, target: &Prefix, command: PrefixCommand) -> R
     Ok(())
 }
 
-async fn install(bottles: &Bottles, target: &Prefix, id: Uuid) -> Result<()> {
-    let state = bottles.addons().state();
+async fn install(core: &Core, target: &Prefix, id: Uuid) -> Result<()> {
+    let state = core.addons().state();
     if let Some(runner) = state.release::<Runner>(id) {
         run_operation(target.edit(move |edit| {
             edit.set_runner(runner);

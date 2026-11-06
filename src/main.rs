@@ -10,9 +10,9 @@ mod prefixes;
 
 #[cfg(feature = "fvs")]
 use std::path::PathBuf;
-use std::{error::Error, io, sync::Arc};
+use std::{error::Error, io};
 
-use bottles_core::{Bottles, Config, Operation};
+use bottles_core::{Core, Operation};
 use bottles_plugin_host::Plugins;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -61,22 +61,18 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let plugins = Plugins::new()?;
-    let bottles = Bottles::open(
-        Config {
-            #[cfg(feature = "fvs")]
-            fvs2d: cli.fvs2d,
-            component_catalog: cli.component_catalog,
-            dependency_catalog: cli.dependency_catalog,
-        },
-        Arc::clone(&plugins),
-    )
-    .await?;
+    let core = Core::open()
+        .component_catalog(cli.component_catalog)
+        .dependency_catalog(cli.dependency_catalog);
+    #[cfg(feature = "fvs")]
+    let core = core.fvs2d(cli.fvs2d);
+    let core = core.await?;
     let result = match cli.command {
-        Command::Addons { command } => addons::run(bottles.addons(), command).await,
-        Command::Prefix { command } => prefixes::run(&bottles, command).await,
+        Command::Addons { command } => addons::run(core.addons(), command).await,
+        Command::Prefix { command } => prefixes::run(&core, command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
     };
-    let shutdown = bottles.shutdown().await;
+    let shutdown = core.shutdown().await;
     result?;
     shutdown?;
     Ok(())
