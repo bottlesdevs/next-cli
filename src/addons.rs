@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf};
 
-use bottles_core::{Addon, AddonRole, Addons, Component, Runner, Slot, Umu, WineBridge};
+use bottles_core::{Addon, AddonRole, Component, Core, Runner, Slot, Umu, WineBridge};
 use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
@@ -39,13 +39,15 @@ pub enum LocalKind {
     LatencyFlex,
 }
 
-pub async fn run(addons: &Addons, command: Command) -> Result<()> {
+pub async fn run(core: &Core, command: Command) -> Result<()> {
     match command {
         Command::Refresh => {
-            run_operation(addons.refresh()).await?;
+            run_operation(core.catalogs().refresh()).await?;
         }
-        Command::List => list(addons),
-        Command::Download { id } => print(&run_operation(addons.fetch::<AddonRole>(id)).await?),
+        Command::List => list(core),
+        Command::Download { id } => {
+            print(&run_operation(core.catalogs().fetch::<AddonRole>(id)).await?)
+        }
         Command::Import {
             source,
             kind,
@@ -64,25 +66,32 @@ pub async fn run(addons: &Addons, command: Command) -> Result<()> {
                 }
                 .into(),
             };
-            print(&run_operation(addons.import(source, name, version, Vec::new(), role)).await?);
+            print(
+                &run_operation(
+                    core.addons()
+                        .import(source, name, version, Vec::new(), role),
+                )
+                .await?,
+            );
         }
-        Command::Delete { id } => addons.remove(id).await?,
+        Command::Delete { id } => core.addons().remove(id).await?,
     }
     Ok(())
 }
 
-fn list(addons: &Addons) {
-    let state = addons.state();
+fn list(core: &Core) {
+    let state = core.addons().state();
+    let catalogs = core.catalogs().state();
     let mut local: Vec<_> = state.releases::<AddonRole>().iter().map(row).collect();
     local.sort_unstable_by_key(|(id, ..)| *id);
     let ids: HashSet<_> = local.iter().map(|(id, ..)| *id).collect();
     for (id, name, version, kind) in local {
         println!("{id}\t{name}\t{version}\t{kind}\tlocal");
     }
-    for entry in state
+    for entry in catalogs
         .component_entries()
         .into_iter()
-        .chain(state.dependency_entries())
+        .chain(catalogs.dependency_entries())
     {
         if ids.contains(&entry.id()) {
             continue;

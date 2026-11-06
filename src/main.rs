@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     let core = core.fvs2d(cli.fvs2d);
     let core = core.build().await?;
     let result = match cli.command {
-        Command::Addons { command } => addons::run(core.addons(), command).await,
+        Command::Addons { command } => addons::run(&core, command).await,
         Command::Prefix { command } => prefixes::run(&core, command).await,
         Command::Plugins { command } => plugins::run(&plugins, command).await,
     };
