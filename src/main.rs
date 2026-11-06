@@ -12,7 +12,7 @@ mod prefixes;
 use std::path::PathBuf;
 use std::{error::Error, io, sync::Arc};
 
-use bottles_core::{Bottles, Config, Directories, Operation};
+use bottles_core::{Bottles, Config, Operation};
 use bottles_plugin_host::Plugins;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -60,8 +60,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let directories = Directories::new().await?;
-    let plugins = Plugins::open(directories.plugins(), directories.staging()).await?;
+    let plugins = Plugins::new()?;
     let bottles = Bottles::open(
         Config {
             #[cfg(feature = "fvs")]
