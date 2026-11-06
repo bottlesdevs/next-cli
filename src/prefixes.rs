@@ -344,9 +344,7 @@ fn show(prefix: &Prefix) -> Result<()> {
     if let Some(umu) = &state.umu {
         println!("umu: {}", umu.id());
     }
-    let mut components: Vec<_> = state.components.values().collect();
-    components.sort_unstable_by_key(|item| item.slot().as_str());
-    for item in components {
+    for item in &state.components {
         println!(
             "component: {} {} {} {}",
             item.id(),
@@ -455,7 +453,7 @@ async fn uninstall(target: &Prefix, id: Uuid) -> Result<()> {
     } else {
         let slot = settings
             .components
-            .values()
+            .iter()
             .find(|item| item.id() == id)
             .map(Addon::slot)
             .ok_or_else(|| missing("installed component", id))?;
