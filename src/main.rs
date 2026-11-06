@@ -61,12 +61,12 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let plugins = Plugins::new()?;
-    let core = Core::open()
+    let core = Core::builder()
         .component_catalog(cli.component_catalog)
         .dependency_catalog(cli.dependency_catalog);
     #[cfg(feature = "fvs")]
     let core = core.fvs2d(cli.fvs2d);
-    let core = core.await?;
+    let core = core.build().await?;
     let result = match cli.command {
         Command::Addons { command } => addons::run(core.addons(), command).await,
         Command::Prefix { command } => prefixes::run(&core, command).await,
