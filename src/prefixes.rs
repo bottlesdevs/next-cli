@@ -344,7 +344,7 @@ fn show(prefix: &Prefix) -> Result<()> {
     if let Some(umu) = &state.umu {
         println!("umu: {}", umu.id());
     }
-    for item in &state.components {
+    for item in state.components.values() {
         println!(
             "component: {} {} {} {}",
             item.id(),
@@ -453,7 +453,7 @@ async fn uninstall(target: &Prefix, id: Uuid) -> Result<()> {
     } else {
         let slot = settings
             .components
-            .iter()
+            .values()
             .find(|item| item.id() == id)
             .map(Addon::slot)
             .ok_or_else(|| missing("installed component", id))?;
