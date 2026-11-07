@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use bottles_plugin_host::{PluginInfo, Plugins};
+use bottles_plugin_host::{Manifest, Plugins};
 use clap::Subcommand;
 
 use crate::Result;
@@ -11,25 +11,20 @@ pub enum Command {
     List,
     /// Build and install a local plugin source checkout.
     DevInstall { source: PathBuf },
-    /// Reload an installed plugin.
-    Reload { plugin: String },
     /// Remove an installed plugin.
     Uninstall { plugin: String },
 }
 
 pub async fn run(plugins: &Plugins, command: Command) -> Result<()> {
     match command {
-        Command::List => plugins.list().iter().for_each(print),
+        Command::List => plugins.list()?.iter().for_each(print),
         Command::DevInstall { source } => print(&dev_install(plugins, &source).await?),
-        Command::Reload { plugin } => {
-            plugins.reload(&plugin).await?;
-        }
-        Command::Uninstall { plugin } => plugins.uninstall(&plugin).await?,
+        Command::Uninstall { plugin } => plugins.uninstall(&plugin)?,
     }
     Ok(())
 }
 
-async fn dev_install(plugins: &Plugins, source: &Path) -> Result<PluginInfo> {
+async fn dev_install(plugins: &Plugins, source: &Path) -> Result<Manifest> {
     let manifest = source.join("Cargo.toml");
     let cargo = tokio::fs::read_to_string(&manifest).await?;
     let target = target_name(&cargo)?;
@@ -82,9 +77,6 @@ fn target_name(source: &str) -> Result<String> {
     Ok(name.replace('-', "_"))
 }
 
-fn print(plugin: &PluginInfo) {
-    println!(
-        "{}\t{}\t{}",
-        plugin.manifest.id, plugin.manifest.name, plugin.manifest.version
-    );
+fn print(manifest: &Manifest) {
+    println!("{}\t{}\t{}", manifest.id, manifest.name, manifest.version);
 }
