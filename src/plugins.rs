@@ -58,7 +58,7 @@ async fn dev_install(plugins: &Plugins, source: &Path) -> Result<Manifest> {
         package.join("plugin.wasm"),
     )
     .await?;
-    Ok(plugins.install(&package).await?)
+    Ok(plugins.install(&package)?)
 }
 
 fn target_name(source: &str) -> Result<String> {
