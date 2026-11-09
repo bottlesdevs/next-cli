@@ -31,7 +31,13 @@ async fn dev_install(plugins: &Plugins, source: &Path) -> Result<Manifest> {
     let staging = tempfile::tempdir()?;
     let target_dir = staging.path().join("target");
     let output = tokio::process::Command::new("cargo")
-        .args(["build", "--release", "--target", "wasm32-wasip2"])
+        .args([
+            "+nightly-2026-09-25",
+            "build",
+            "--release",
+            "--target",
+            "wasm32-wasip3",
+        ])
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
@@ -52,7 +58,7 @@ async fn dev_install(plugins: &Plugins, source: &Path) -> Result<Manifest> {
     tokio::fs::copy(source.join("plugin.toml"), package.join("plugin.toml")).await?;
     tokio::fs::copy(
         target_dir
-            .join("wasm32-wasip2/release")
+            .join("wasm32-wasip3/release")
             .join(target)
             .with_extension("wasm"),
         package.join("plugin.wasm"),
