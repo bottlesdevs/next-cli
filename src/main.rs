@@ -28,12 +28,10 @@ struct Cli {
     /// Path to the FVS daemon executable.
     #[arg(long, global = true, value_name = "PATH")]
     fvs2d: Option<PathBuf>,
-    /// Override the component catalog URL.
-    #[arg(long, global = true)]
-    component_catalog: Option<Url>,
-    /// Override the dependency catalog URL.
-    #[arg(long, global = true)]
-    dependency_catalog: Option<Url>,
+    /// Use this catalog source instead of the defaults. Repeat for several;
+    /// earlier sources win.
+    #[arg(long = "catalog", global = true, value_name = "URL")]
+    catalogs: Vec<Url>,
     #[command(subcommand)]
     command: Command,
 }
@@ -61,9 +59,10 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let plugins = Plugins::new()?;
-    let core = Core::builder()
-        .component_catalog(cli.component_catalog)
-        .dependency_catalog(cli.dependency_catalog);
+    let mut core = Core::builder();
+    if !cli.catalogs.is_empty() {
+        core = core.catalogs(cli.catalogs);
+    }
     #[cfg(feature = "fvs")]
     let core = core.fvs2d(cli.fvs2d);
     let core = core.build().await?;
