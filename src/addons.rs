@@ -82,17 +82,16 @@ pub async fn run(core: &Core, command: Command) -> Result<()> {
 fn list(core: &Core) {
     let state = core.addons().state();
     let catalogs = core.catalogs().state();
-    let mut local: Vec<_> = state.releases::<AddonRole>().iter().map(row).collect();
+    let mut local: Vec<_> = state
+        .releases::<AddonRole>()
+        .map(|release| row(&release))
+        .collect();
     local.sort_unstable_by_key(|(id, ..)| *id);
     let ids: HashSet<_> = local.iter().map(|(id, ..)| *id).collect();
     for (id, name, version, kind) in local {
         println!("{id}\t{name}\t{version}\t{kind}\tlocal");
     }
-    for entry in catalogs
-        .component_entries()
-        .into_iter()
-        .chain(catalogs.dependency_entries())
-    {
+    for entry in catalogs.entries::<AddonRole>() {
         if ids.contains(&entry.id()) {
             continue;
         }
