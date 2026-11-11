@@ -125,7 +125,7 @@ fn label(role: AddonRole) -> &'static str {
         AddonRole::Runner(_) => "runner",
         AddonRole::WineBridge(_) => "winebridge",
         AddonRole::Umu(_) => "umu",
-        AddonRole::Component(component) => component.slot.as_str(),
+        AddonRole::Component(component) => component.slot.into(),
         AddonRole::Dependency(_) => "dependency",
     }
 }
