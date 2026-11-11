@@ -478,7 +478,7 @@ async fn uninstall(target: &Prefix, id: Uuid) -> Result<()> {
             .components
             .values()
             .find(|item| item.id() == id)
-            .map(Addon::slot)
+            .map(|item| item.slot())
             .ok_or_else(|| missing("installed component", id))?;
         run_operation(target.edit(move |edit| edit.remove_component(slot))).await?;
     }
