@@ -1,6 +1,8 @@
 use std::{collections::HashSet, path::PathBuf};
 
-use bottles_core::{Addon, AddonRole, Component, Core, Runner, Slot, Umu, WineBridge};
+use bottles_core::{
+    Addon, AddonRole, Component, Core, Runner, RunnerFlavor, Slot, Umu, WineBridge,
+};
 use clap::{Subcommand, ValueEnum};
 use uuid::Uuid;
 
@@ -30,7 +32,8 @@ pub enum Command {
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum LocalKind {
-    Runner,
+    Wine,
+    Proton,
     Winebridge,
     Umu,
     Dxvk,
@@ -55,7 +58,14 @@ pub async fn run(core: &Core, command: Command) -> Result<()> {
             version,
         } => {
             let role: AddonRole = match kind {
-                LocalKind::Runner => Runner {}.into(),
+                LocalKind::Wine => Runner {
+                    flavor: RunnerFlavor::Wine,
+                }
+                .into(),
+                LocalKind::Proton => Runner {
+                    flavor: RunnerFlavor::Proton,
+                }
+                .into(),
                 LocalKind::Winebridge => WineBridge {}.into(),
                 LocalKind::Umu => Umu {}.into(),
                 LocalKind::Dxvk => Component { slot: Slot::Dxvk }.into(),
