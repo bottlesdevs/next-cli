@@ -99,7 +99,14 @@ pub enum PrefixCommand {
     /// Delete this prefix and its managed data.
     Delete,
     /// Stop Wine and release mounted storage.
-    Stop,
+    ///
+    /// Running programs are asked to close first; if one refuses, the prefix
+    /// keeps running.
+    Stop {
+        /// Kill every program without asking it to close.
+        #[arg(long)]
+        force: bool,
+    },
     /// List processes reported by WineBridge.
     Processes {
         /// Only list the processes in this process group.
@@ -386,7 +393,7 @@ async fn manage(core: &Core, target: &Prefix, command: PrefixCommand) -> Result<
         PrefixCommand::Delete => {
             run_operation(core.prefixes().delete(target.id())).await?;
         }
-        PrefixCommand::Stop => run_operation(target.stop()).await?,
+        PrefixCommand::Stop { force } => run_operation(target.stop(force)).await?,
         PrefixCommand::Processes { group } => {
             for process in target.processes(group).await? {
                 println!(
