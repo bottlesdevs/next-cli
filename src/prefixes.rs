@@ -386,7 +386,7 @@ async fn manage(core: &Core, target: &Prefix, command: PrefixCommand) -> Result<
         PrefixCommand::Delete => {
             run_operation(core.prefixes().delete(target.id())).await?;
         }
-        PrefixCommand::Stop => target.stop().await?,
+        PrefixCommand::Stop => run_operation(target.stop()).await?,
         PrefixCommand::Processes { group } => {
             for process in target.processes(group).await? {
                 println!(
