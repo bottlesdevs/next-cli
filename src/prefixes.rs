@@ -1,6 +1,7 @@
 use bottles_core::{
     Addon, Component, Core, Dependency, DllOverrideMode, EnvVars, GamescopeConfig, GamescopeFilter,
-    GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineBridge, Wrappers,
+    GamescopeScaler, Prefix, PrefixBackend, ProgramSpec, Runner, Umu, WineArch, WineBridge,
+    Wrappers,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use futures_util::StreamExt;
@@ -28,6 +29,9 @@ pub enum Command {
 pub struct CreatePrefix {
     #[arg(long, value_enum, default_value_t = Storage::Standard)]
     storage: Storage,
+    /// Windows architecture of the prefix; it cannot be changed later.
+    #[arg(long, value_enum, default_value_t = Arch::Win64)]
+    arch: Arch,
     #[command(flatten)]
     runtime: RuntimeArgs,
 }
@@ -48,7 +52,6 @@ struct RuntimeArgs {
 #[derive(Clone, Copy, ValueEnum)]
 enum Storage {
     Standard,
-    #[cfg(feature = "fvs")]
     Virgo,
 }
 
@@ -56,8 +59,22 @@ impl From<Storage> for PrefixBackend {
     fn from(value: Storage) -> Self {
         match value {
             Storage::Standard => Self::Standard,
-            #[cfg(feature = "fvs")]
             Storage::Virgo => Self::Virgo,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Arch {
+    Win64,
+    Win32,
+}
+
+impl From<Arch> for WineArch {
+    fn from(value: Arch) -> Self {
+        match value {
+            Arch::Win64 => Self::Win64,
+            Arch::Win32 => Self::Win32,
         }
     }
 }
@@ -314,12 +331,14 @@ pub async fn run(core: &Core, command: Command) -> Result<()> {
     match command {
         Command::Create(args) => {
             let (runner, winebridge, umu) = runtime(core, args.runtime)?;
-            let prefix =
-                run_operation(
-                    core.prefixes()
-                        .create(args.storage.into(), runner, winebridge, umu),
-                )
-                .await?;
+            let prefix = run_operation(core.prefixes().create(
+                args.storage.into(),
+                args.arch.into(),
+                runner,
+                winebridge,
+                umu,
+            ))
+            .await?;
             show(&prefix)?;
         }
         Command::List => {
@@ -347,9 +366,10 @@ fn runtime(core: &Core, args: RuntimeArgs) -> Result<RuntimeSelection> {
 fn show(prefix: &Prefix) -> Result<()> {
     let state = prefix.state()?;
     println!(
-        "id: {}\nstorage: {:?}\nrunner: {}\nwinebridge: {}",
+        "id: {}\nstorage: {:?}\narch: {}\nrunner: {}\nwinebridge: {}",
         prefix.id(),
         state.backend,
+        state.arch,
         state.runner.id(),
         state.winebridge.id()
     );
