@@ -134,7 +134,7 @@ fn row(item: &Addon<AddonRole>) -> (Uuid, String, String, &'static str) {
     (
         item.id(),
         item.name().to_owned(),
-        item.version().to_owned(),
+        item.version().to_string(),
         label(item.role()),
     )
 }
