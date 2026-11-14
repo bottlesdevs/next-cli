@@ -31,13 +31,7 @@ async fn dev_install(plugins: &Plugins, source: &Path) -> Result<Manifest> {
     let staging = tempfile::tempdir()?;
     let target_dir = staging.path().join("target");
     let output = tokio::process::Command::new("cargo")
-        .args([
-            "+nightly-2026-09-25",
-            "build",
-            "--release",
-            "--target",
-            "wasm32-wasip3",
-        ])
+        .args(["build", "--release", "--target", "wasm32-wasip3"])
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
